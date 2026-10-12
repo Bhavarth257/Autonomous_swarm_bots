@@ -3,7 +3,9 @@
 Parts are expressed in the victim model frame: origin on the floor at the
 pelvis, body axis along +x (head at +x when lying, legs at +x when sitting).
 Skin is ~36 C and clothing a few degrees cooler, which is what a thermal
-camera sees on a real casualty.
+camera sees on a real casualty. Torso and legs are at least 0.17 m tall, above
+the hexabot's climbable step height, so traversability never treats a body as
+something to walk over.
 """
 from __future__ import annotations
 
@@ -25,8 +27,8 @@ def build(posture, rng, warm=True):
         parts = [
             Part('torso', 'box', (0.55, 0.36, 0.2), (0.15, 0, 0.1, 0, 0, 0), shirt, tc),
             Part('head', 'sphere', (0.11,), (0.55, 0, 0.11, 0, 0, 0), skin, ts),
-            Part('leg_l', 'box', (0.85, 0.14, 0.14), (-0.55, 0.09, 0.07, 0, 0, 0), pants, tc),
-            Part('leg_r', 'box', (0.85, 0.14, 0.14), (-0.55, -0.09, 0.07, 0, 0, 0), pants, tc),
+            Part('leg_l', 'box', (0.85, 0.15, 0.17), (-0.55, 0.09, 0.085, 0, 0, 0), pants, tc),
+            Part('leg_r', 'box', (0.85, 0.15, 0.17), (-0.55, -0.09, 0.085, 0, 0, 0), pants, tc),
             Part('arm_l', 'box', (0.55, 0.09, 0.09), (arm_x, 0.24, 0.05, 0, 0, 0), shirt, tc, False),
             Part('arm_r', 'box', (0.55, 0.09, 0.09), (0.05, -0.24, 0.05, 0, 0, 0), shirt, tc, False),
             Part('hand_l', 'sphere', (0.05,), (arm_x + 0.32, 0.24, 0.05, 0, 0, 0), skin, ts, False),
@@ -39,8 +41,8 @@ def build(posture, rng, warm=True):
         parts = [
             Part('torso', 'box', (0.24, 0.38, 0.58), (-0.02, 0, 0.42, 0, -lean, 0), shirt, tc),
             Part('head', 'sphere', (0.11,), (-0.1, 0, 0.84, 0, 0, 0), skin, ts),
-            Part('leg_l', 'box', (0.85, 0.14, 0.14), (0.47, 0.09, 0.07, 0, 0, 0), pants, tc),
-            Part('leg_r', 'box', (0.85, 0.14, 0.14), (0.47, -0.09, 0.07, 0, 0, 0), pants, tc),
+            Part('leg_l', 'box', (0.85, 0.15, 0.17), (0.47, 0.09, 0.085, 0, 0, 0), pants, tc),
+            Part('leg_r', 'box', (0.85, 0.15, 0.17), (0.47, -0.09, 0.085, 0, 0, 0), pants, tc),
             Part('arm_l', 'box', (0.09, 0.09, 0.5), (0.0, 0.25, 0.4, 0, -0.1, 0), shirt, tc, False),
             Part('arm_r', 'box', (0.09, 0.09, 0.5), (0.0, -0.25, 0.4, 0, -0.1, 0), shirt, tc, False),
             Part('hand_l', 'sphere', (0.05,), (0.05, 0.25, 0.14, 0, 0, 0), skin, ts, False),

@@ -18,9 +18,10 @@ class Part:
 
 @dataclass
 class Footprint:
-    """Oriented floor rectangle that blocks the robot."""
+    """Oriented floor rectangle covered by an obstacle."""
     x: float
     y: float
     yaw: float
     lx: float
     ly: float
+    climbable: bool = False    # a hexabot can walk over it

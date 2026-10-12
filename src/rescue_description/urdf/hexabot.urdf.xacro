@@ -1,0 +1,221 @@
+<?xml version="1.0"?>
+<!--
+  RHex-style search hexabot: rigid body with six rotating half-circle C-legs.
+
+  Legs turn about their hip axis (+y); theta = 0 means the leg points straight down.
+  The rescue_hexabot HexGait plugin runs an alternating-tripod gait from /<ns>/cmd_vel.
+  It can climb obstacles up to about hip height (~0.16 m).
+
+  Every topic and TF frame is prefixed with `ns` so several robots share one world
+  and one /tf tree (r1/base_link, r2/base_link, ...). The odometry TF
+  (odom -> base_footprint -> base_link) comes from the hexabot_odom node, not from
+  this URDF, so base_link is the root here.
+-->
+<robot name="hexabot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="ns" default="r1"/>
+  <xacro:arg name="sensors" default="true"/>  <!-- false: no rendering sensors (tests) -->
+  <xacro:property name="ns" value="$(arg ns)"/>
+
+  <xacro:property name="body_l" value="0.54"/>
+  <xacro:property name="body_w" value="0.24"/>
+  <xacro:property name="body_h" value="0.08"/>
+  <xacro:property name="hip_x" value="0.22"/>     <!-- front/rear hip offset from centre -->
+  <xacro:property name="hip_y" value="0.150"/>    <!-- leg plane, outside the body -->
+  <xacro:property name="hip_z" value="-0.02"/>    <!-- hip axis below body centre -->
+  <xacro:property name="leg_r" value="0.15"/>     <!-- foot arc radius about the hip -->
+  <xacro:property name="leg_arc0" value="-145"/>  <!-- foot arc ends (deg, -90 = down) -->
+  <xacro:property name="leg_arc1" value="-35"/>
+  <xacro:property name="stance_deg" value="90"/>
+  <xacro:property name="duty" value="0.55"/>
+  <xacro:property name="leg_t" value="0.014"/>    <!-- leg tube radius -->
+
+  <material name="body"><color rgba="0.85 0.33 0.05 1"/></material>
+  <material name="dark"><color rgba="0.1 0.1 0.1 1"/></material>
+  <material name="rubber"><color rgba="0.18 0.18 0.2 1"/></material>
+
+  <xacro:macro name="box_inertia" params="m x y z">
+    <inertial><mass value="${m}"/>
+      <inertia ixx="${m*(y*y+z*z)/12}" iyy="${m*(x*x+z*z)/12}" izz="${m*(x*x+y*y)/12}" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- ===== body ===== -->
+  <link name="base_link">
+    <visual><geometry><box size="${body_l} ${body_w} ${body_h}"/></geometry><material name="body"/></visual>
+    <visual><origin xyz="0 0 ${body_h/2 + 0.005}"/>
+      <geometry><box size="${body_l - 0.06} ${body_w - 0.04} 0.01"/></geometry><material name="dark"/></visual>
+    <collision><geometry><box size="${body_l} ${body_w} ${body_h}"/></geometry></collision>
+    <!-- Battery sits low and forward: lower, forward centre of mass resists flipping when climbing. -->
+    <inertial><origin xyz="0.03 0 -0.02"/><mass value="3.0"/>
+      <inertia ixx="${3.0*(body_w**2 + body_h**2)/12}" iyy="${3.0*(body_l**2 + body_h**2)/12}"
+               izz="${3.0*(body_l**2 + body_w**2)/12}" ixy="0" ixz="0" iyz="0"/></inertial>
+  </link>
+  <!-- Belly slides over debris instead of snagging on it. -->
+  <gazebo reference="base_link"><mu1>0.3</mu1><mu2>0.3</mu2></gazebo>
+
+  <!-- ===== C-legs (whegs) ===== -->
+  <!-- Each leg is a spoke from the hip plus a foot arc centred on the hip axis, spanning
+       leg_arc0..leg_arc1 degrees (-90 = straight down). During stance the robot rolls on that
+       arc like a wheel, so the body stays level; the open side of the C hooks over edges
+       when the leg swings over the top, which is what lets it climb. -->
+  <xacro:macro name="tube" params="x0 z0 x1 z1">
+    <xacro:property name="seg_len" value="${sqrt((x1-x0)**2 + (z1-z0)**2)}"/>
+    <xacro:property name="seg_pitch" value="${atan2(x1-x0, z1-z0)}"/>
+    <visual><origin xyz="${(x0+x1)/2} 0 ${(z0+z1)/2}" rpy="0 ${seg_pitch} 0"/>
+      <geometry><cylinder radius="${leg_t}" length="${seg_len}"/></geometry><material name="rubber"/></visual>
+    <collision><origin xyz="${(x0+x1)/2} 0 ${(z0+z1)/2}" rpy="0 ${seg_pitch} 0"/>
+      <geometry><cylinder radius="${leg_t}" length="${seg_len}"/></geometry></collision>
+    <collision><origin xyz="${x1} 0 ${z1}"/><geometry><sphere radius="${leg_t}"/></geometry></collision>
+  </xacro:macro>
+  <xacro:macro name="arc_tube" params="a0 a1">
+    <xacro:tube x0="${leg_r*cos(radians(a0))}" z0="${leg_r*sin(radians(a0))}"
+                x1="${leg_r*cos(radians(a1))}" z1="${leg_r*sin(radians(a1))}"/>
+  </xacro:macro>
+
+  <xacro:macro name="leg" params="name x y">
+    <link name="${name}_leg">
+      <xacro:tube x0="0" z0="0" x1="${leg_r*cos(radians(leg_arc1))}" z1="${leg_r*sin(radians(leg_arc1))}"/>
+      <xacro:arc_tube a0="${leg_arc1}" a1="${leg_arc1 - 22}"/>
+      <xacro:arc_tube a0="${leg_arc1 - 22}" a1="${leg_arc1 - 44}"/>
+      <xacro:arc_tube a0="${leg_arc1 - 44}" a1="${leg_arc1 - 66}"/>
+      <xacro:arc_tube a0="${leg_arc1 - 66}" a1="${leg_arc1 - 88}"/>
+      <xacro:arc_tube a0="${leg_arc1 - 88}" a1="${leg_arc0}"/>
+      <inertial><origin xyz="0 0 ${-0.75*leg_r}"/><mass value="0.12"/>
+        <inertia ixx="6e-4" iyy="8e-4" izz="3e-4" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <joint name="${name}_hip" type="continuous">
+      <parent link="base_link"/><child link="${name}_leg"/>
+      <origin xyz="${x} ${y} ${hip_z}"/>
+      <axis xyz="0 1 0"/>
+      <limit effort="8" velocity="30"/>
+      <dynamics damping="0.01"/>
+    </joint>
+    <gazebo reference="${name}_leg"><mu1>1.2</mu1><mu2>1.2</mu2></gazebo>
+  </xacro:macro>
+
+  <xacro:leg name="lf" x="${hip_x}" y="${hip_y}"/>
+  <xacro:leg name="lm" x="0" y="${hip_y}"/>
+  <xacro:leg name="lr" x="${-hip_x}" y="${hip_y}"/>
+  <xacro:leg name="rf" x="${hip_x}" y="${-hip_y}"/>
+  <xacro:leg name="rm" x="0" y="${-hip_y}"/>
+  <xacro:leg name="rr" x="${-hip_x}" y="${-hip_y}"/>
+
+  <!-- ===== sensors ===== -->
+  <!-- 16-ring 3D lidar, tilted field of view (-25..+15 deg) so it sees the floor from ~0.6 m. -->
+  <link name="lidar_link">
+    <visual><geometry><cylinder radius="0.04" length="0.05"/></geometry><material name="dark"/></visual>
+    <collision><geometry><cylinder radius="0.04" length="0.05"/></geometry></collision>
+    <xacro:box_inertia m="0.2" x="0.08" y="0.08" z="0.05"/>
+  </link>
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/><child link="lidar_link"/>
+    <origin xyz="0.10 0 ${body_h/2 + 0.035}"/>
+  </joint>
+
+  <link name="camera_link">
+    <visual><geometry><box size="0.03 0.09 0.035"/></geometry><material name="dark"/></visual>
+    <xacro:box_inertia m="0.05" x="0.03" y="0.09" z="0.035"/>
+  </link>
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/><child link="camera_link"/>
+    <origin xyz="${body_l/2 + 0.01} 0 0.02"/>
+  </joint>
+  <!-- ROS optical convention: z forward, x right, y down. -->
+  <link name="camera_optical_frame"/>
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera_link"/><child link="camera_optical_frame"/>
+    <origin rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/><child link="imu_link"/>
+  </joint>
+
+  <xacro:if value="$(arg sensors)">
+  <gazebo reference="lidar_link">
+    <sensor name="lidar" type="gpu_lidar">
+      <topic>/${ns}/lidar</topic>
+      <ignition_frame_id>${ns}/lidar_link</ignition_frame_id>
+      <update_rate>10</update_rate>
+      <always_on>true</always_on>
+      <visualize>false</visualize>
+      <lidar>
+        <scan>
+          <horizontal><samples>720</samples><resolution>1</resolution>
+            <min_angle>-3.14159</min_angle><max_angle>3.13286</max_angle></horizontal>
+          <vertical><samples>16</samples><resolution>1</resolution>
+            <min_angle>${radians(-25)}</min_angle><max_angle>${radians(15)}</max_angle></vertical>
+        </scan>
+        <range><min>0.25</min><max>15.0</max><resolution>0.01</resolution></range>
+        <noise><type>gaussian</type><mean>0.0</mean><stddev>0.01</stddev></noise>
+      </lidar>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="camera_link">
+    <sensor name="camera" type="camera">
+      <topic>/${ns}/camera/image_raw</topic>
+      <ignition_frame_id>${ns}/camera_optical_frame</ignition_frame_id>
+      <update_rate>10</update_rate>
+      <always_on>true</always_on>
+      <camera>
+        <horizontal_fov>1.2</horizontal_fov>
+        <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+        <clip><near>0.05</near><far>25</far></clip>
+        <noise><type>gaussian</type><mean>0.0</mean><stddev>0.005</stddev></noise>
+      </camera>
+    </sensor>
+  </gazebo>
+
+  <gazebo reference="imu_link">
+    <sensor name="imu" type="imu">
+      <topic>/${ns}/imu</topic>
+      <ignition_frame_id>${ns}/imu_link</ignition_frame_id>
+      <update_rate>50</update_rate>
+      <always_on>true</always_on>
+    </sensor>
+  </gazebo>
+  </xacro:if>
+
+  <!-- ===== locomotion and state ===== -->
+  <gazebo>
+    <plugin filename="RescueHexGait" name="rescue_hexabot::HexGait">
+      <topic>/${ns}/cmd_vel</topic>
+      <leg><joint>lf_hip</joint><side>left</side><offset>0.0</offset></leg>
+      <leg><joint>lm_hip</joint><side>left</side><offset>0.5</offset></leg>
+      <leg><joint>lr_hip</joint><side>left</side><offset>0.0</offset></leg>
+      <leg><joint>rf_hip</joint><side>right</side><offset>0.5</offset></leg>
+      <leg><joint>rm_hip</joint><side>right</side><offset>0.0</offset></leg>
+      <leg><joint>rr_hip</joint><side>right</side><offset>0.5</offset></leg>
+      <!-- Body speed in stance = rolling radius * leg rate, so one cycle covers this: -->
+      <stride>${(leg_r + leg_t) * radians(stance_deg) / duty}</stride>
+      <track_width>0.52</track_width>  <!-- effective, calibrated for leg slip when turning -->
+      <stance_sweep>${radians(stance_deg)}</stance_sweep>
+      <duty>${duty}</duty>
+      <max_frequency>2.2</max_frequency>
+      <frequency_accel>6.0</frequency_accel>
+      <kp>20</kp>
+      <max_joint_velocity>26</max_joint_velocity>
+      <cmd_timeout>0.5</cmd_timeout>
+      <climb_tilt_start>${radians(12)}</climb_tilt_start>
+      <climb_tilt_full>${radians(30)}</climb_tilt_full>
+      <climb_min_scale>0.35</climb_min_scale>
+      <flip_guard_pitch>${radians(40)}</flip_guard_pitch>
+    </plugin>
+    <!-- Ground-truth pose; hexabot_odom turns it into drifting legged odometry. -->
+    <plugin filename="ignition-gazebo-odometry-publisher-system"
+            name="ignition::gazebo::systems::OdometryPublisher">
+      <dimensions>3</dimensions>
+      <odom_frame>${ns}/gt_odom</odom_frame>
+      <robot_base_frame>${ns}/gt_base_link</robot_base_frame>
+      <odom_topic>/${ns}/ground_truth/odom</odom_topic>
+      <tf_topic>/${ns}/ground_truth/tf</tf_topic>
+      <odom_publish_frequency>50</odom_publish_frequency>
+    </plugin>
+    <plugin filename="ignition-gazebo-joint-state-publisher-system"
+            name="ignition::gazebo::systems::JointStatePublisher">
+      <topic>/${ns}/joint_states</topic>
+    </plugin>
+  </gazebo>
+</robot>

@@ -1,0 +1,31 @@
+cmake_minimum_required(VERSION 3.8)
+project(rescue_hexabot)
+
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(ignition-gazebo6 REQUIRED)
+find_package(ignition-plugin1 REQUIRED COMPONENTS register)
+find_package(ignition-transport11 REQUIRED)
+find_package(ignition-msgs8 REQUIRED)
+
+# Gazebo system plugin: tripod gait for the six C-legs.
+add_library(RescueHexGait SHARED src/HexGait.cc)
+target_link_libraries(RescueHexGait
+  ignition-gazebo6::ignition-gazebo6
+  ignition-plugin1::register
+  ignition-transport11::ignition-transport11
+  ignition-msgs8::ignition-msgs8)
+install(TARGETS RescueHexGait LIBRARY DESTINATION lib)
+
+install(PROGRAMS scripts/hexabot_odom DESTINATION lib/${PROJECT_NAME})
+
+# Sourcing the workspace puts the plugin on Gazebo's search path.
+ament_environment_hooks("${CMAKE_CURRENT_SOURCE_DIR}/hooks/rescue_hexabot.dsv.in")
+
+ament_package()

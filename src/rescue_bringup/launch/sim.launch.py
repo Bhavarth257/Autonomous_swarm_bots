@@ -1,11 +1,17 @@
-"""Collapsed-building world + N rescue robots in Gazebo Fortress.
+"""Collapsed-building world + N rescue hexabots in Gazebo Fortress.
 
   ros2 launch rescue_bringup sim.launch.py seed:=4 num_robots:=3 gui:=true rviz:=true
 
 The world is generated from `seed` (same seed -> same building and victims) into
-~/.ros/rescue_worlds/. Each robot rN gets:
-  /rN/cmd_vel /rN/odom /rN/scan /rN/imu /rN/camera/{image_raw,camera_info} /rN/joint_states
-and TF frames rN/odom -> rN/base_footprint -> ... on the shared /tf.
+~/.ros/rescue_worlds/. Each hexabot rN gets:
+  /rN/cmd_vel                 drive command (tripod gait plugin)
+  /rN/odom                    drifting legged odometry (hexabot_odom)
+  /rN/lidar/points            16-ring 3D lidar
+  /rN/scan                    2D scan cut from the cloud 0.25-1.5 m above the ground
+                              (walls and tall rubble only; climbable debris is below it)
+  /rN/imu /rN/camera/{image_raw,camera_info} /rN/joint_states
+  /rN/ground_truth/odom       simulator pose, for scoring only
+and TF frames rN/odom -> rN/base_footprint -> rN/base_link -> ... on the shared /tf.
 
 The robots start at known poses outside the entrance, so `world -> rN/map` is a
 static transform; until SLAM runs (`slam:=false`), `rN/map -> rN/odom` is identity.
@@ -33,8 +39,18 @@ def _robot(ns, spawn, description, slam):
              parameters=[{'robot_description': description, 'frame_prefix': f'{ns}/', **sim_time}]),
         Node(package='ros_gz_sim', executable='create', output='screen',
              arguments=['-name', ns, '-topic', f'/{ns}/robot_description',
-                        '-x', str(spawn['x']), '-y', str(spawn['y']), '-z', '0.01',
+                        '-x', str(spawn['x']), '-y', str(spawn['y']), '-z', '0.2',
                         '-Y', str(spawn['yaw'])]),
+        Node(package='rescue_hexabot', executable='hexabot_odom', namespace=ns,
+             parameters=[sim_time]),
+        Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
+             name='cloud_to_scan', namespace=ns,
+             remappings=[('cloud_in', 'lidar/points'), ('scan', 'scan')],
+             parameters=[{'target_frame': f'{ns}/base_footprint', 'transform_tolerance': 0.05,
+                          'min_height': 0.25, 'max_height': 1.5,
+                          'angle_min': -3.14159, 'angle_max': 3.14159, 'angle_increment': 0.0087,
+                          'scan_time': 0.1, 'range_min': 0.45, 'range_max': 15.0,
+                          'use_inf': True, **sim_time}]),
         Node(package='tf2_ros', executable='static_transform_publisher', name=f'{ns}_world_tf',
              arguments=['--x', str(spawn['x']), '--y', str(spawn['y']), '--yaw', str(spawn['yaw']),
                         '--frame-id', 'world', '--child-frame-id', f'{ns}/map'],
@@ -51,10 +67,9 @@ def _robot(ns, spawn, description, slam):
 def _bridge_topics(ns):
     return [
         f'/{ns}/cmd_vel@geometry_msgs/msg/Twist]ignition.msgs.Twist',
-        f'/{ns}/odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry',
-        f'/{ns}/tf@tf2_msgs/msg/TFMessage[ignition.msgs.Pose_V',
+        f'/{ns}/ground_truth/odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry',
         f'/{ns}/joint_states@sensor_msgs/msg/JointState[ignition.msgs.Model',
-        f'/{ns}/scan@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan',
+        f'/{ns}/lidar/points@sensor_msgs/msg/PointCloud2[ignition.msgs.PointCloudPacked',
         f'/{ns}/imu@sensor_msgs/msg/Imu[ignition.msgs.IMU',
         f'/{ns}/camera/image_raw@sensor_msgs/msg/Image[ignition.msgs.Image',
         f'/{ns}/camera/camera_info@sensor_msgs/msg/CameraInfo[ignition.msgs.CameraInfo',
@@ -77,20 +92,17 @@ def _setup(context):
         launch_arguments={'gz_args': f'-r {"" if gui else "-s "}{paths["sdf"]}'}.items())
 
     xacro_file = os.path.join(get_package_share_directory('rescue_description'),
-                              'urdf', 'rescue_bot.urdf.xacro')
+                              'urdf', 'hexabot.urdf.xacro')
     namespaces = [f'r{k + 1}' for k in range(n)]
     actions = [gz]
     bridge_args = ['/clock@rosgraph_msgs/msg/Clock[ignition.msgs.Clock']
-    remaps = []
     for k, ns in enumerate(namespaces):
         description = xacro.process_file(xacro_file, mappings={'ns': ns}).toxml()
         actions += _robot(ns, gt['spawns'][k], description, slam)
         bridge_args += _bridge_topics(ns)
-        remaps.append((f'/{ns}/tf', '/tf'))
 
     actions.append(Node(package='ros_gz_bridge', executable='parameter_bridge', name='gz_bridge',
-                        arguments=bridge_args, remappings=remaps,
-                        parameters=[{'use_sim_time': True}], output='screen'))
+                        arguments=bridge_args, parameters=[{'use_sim_time': True}], output='screen'))
 
     if rviz:
         cfg = os.path.join(DEFAULT_OUT, f'rviz_{n}.rviz')

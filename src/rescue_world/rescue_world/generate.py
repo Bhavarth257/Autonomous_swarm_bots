@@ -3,8 +3,10 @@
 Writes, for ``name = rescue_<seed>``:
   <name>.sdf          Gazebo world
   <name>.json         ground truth: victims, decoys, spawns, entrance, explorable area
-  <name>_map.pgm/yaml ground-truth occupancy map (nav2 map_server format)
-  <name>_preview.png  top-down picture with victims (red: visible, orange: buried, blue: decoy)
+  <name>_map.pgm/yaml ground-truth occupancy map (nav2 map_server format; blocking = black,
+                      climbable = grey, which map_server reads as unknown)
+  <name>_preview.png  top-down picture: blocking dark, climbable tan, victims red (visible) /
+                      orange (buried), decoys blue, spawns green
 """
 from __future__ import annotations
 
@@ -40,6 +42,7 @@ def _preview(layout):
     grid, reach = layout.grid, layout.reachable
     img = np.full(grid.shape + (3,), 255, np.uint8)
     img[reach] = (225, 240, 225)
+    img[layout.climbable] = (205, 180, 135)
     img[grid] = (60, 60, 60)
     ox, oy = layout.grid_origin
 
@@ -74,7 +77,7 @@ def generate(seed=0, out_dir=DEFAULT_OUT, name=None, n_robots=3, **kw):
         f.write(to_sdf(layout))
 
     ox, oy = layout.grid_origin
-    occ = np.where(layout.grid, 0, 254).astype(np.uint8)[::-1]
+    occ = np.where(layout.grid, 0, np.where(layout.climbable, 140, 254)).astype(np.uint8)[::-1]
     with open(paths['map_pgm'], 'wb') as f:
         f.write(f'P5\n{occ.shape[1]} {occ.shape[0]}\n255\n'.encode())
         f.write(occ.tobytes())

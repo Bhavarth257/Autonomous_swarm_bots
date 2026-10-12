@@ -5,6 +5,10 @@ Pure geometry, no ROS or SDF: ``generate_layout`` returns a ``Layout`` that
 
 Frame: the building spans [0, width] x [0, height] metres, the entrance is a
 gap in the south wall (y = 0) and the robots spawn just outside it.
+
+Obstacles come in two classes for the RHex-style hexabots:
+  climbable  low blocks, thin beams, gravel, ramped rubble mounds (<= CLIMB_MAX_H steps)
+  blocking   walls, tall rubble piles, leaning slabs, tall beams, victims, buried-victim piles
 """
 from __future__ import annotations
 
@@ -22,9 +26,10 @@ WALL_T = 0.2           # wall thickness
 WALL_H = 2.2           # intact wall height
 DOOR_W = 1.0
 ENTRANCE_W = 1.4
-ROBOT_RADIUS = 0.22    # used to inflate obstacles for the reachability check
+ROBOT_RADIUS = 0.28    # used to inflate blocking obstacles for the reachability check
 GRID_RES = 0.05
-MIN_OBSTACLE_H = 0.25  # everything must reach the 2D lidar plane (~0.145 m)
+CLIMB_MAX_H = 0.13     # tallest step generated as climbable (hexabot manages ~0.16)
+BLOCK_MIN_H = 0.28     # shortest obstacle generated as blocking
 
 CONCRETE = (0.58, 0.57, 0.55)
 RUBBLE_COLORS = [(0.50, 0.47, 0.43), (0.62, 0.58, 0.52), (0.45, 0.40, 0.36),
@@ -69,7 +74,8 @@ class Layout:
     entrance: tuple            # x, y, width
     spawns: list               # (x, y, yaw) per robot
     doors: list                # (x, y, blocked)
-    grid: np.ndarray | None = None        # occupancy, 1 = obstacle
+    grid: np.ndarray | None = None        # blocking obstacles
+    climbable: np.ndarray | None = None   # climbable obstacles (not blocking)
     reachable: np.ndarray | None = None   # inflated free space reachable from spawn
     grid_origin: tuple = (0.0, 0.0)
 
@@ -104,7 +110,7 @@ class _Builder:
         return f'{prefix}_{self._n}'
 
     # ---- primitives -------------------------------------------------------
-    def box(self, prefix, size, pose, color, temperature=None, footprint=True):
+    def box(self, prefix, size, pose, color, temperature=None, footprint=True, climbable=False):
         sx, sy, sz = size
         x, y, z, roll, pitch, yaw = pose
         self.parts.append(Part(self._name(prefix), 'box', size, pose, color, temperature))
@@ -112,7 +118,7 @@ class _Builder:
             # Grow the floor rectangle to cover small roll/pitch tilts.
             lx = sx + abs(math.sin(pitch)) * sz
             ly = sy + abs(math.sin(roll)) * sz
-            self.footprints.append(Footprint(x, y, yaw, lx, ly))
+            self.footprints.append(Footprint(x, y, yaw, lx, ly, climbable))
 
     def rubble_color(self):
         base = self.rng.choice(RUBBLE_COLORS)
@@ -181,7 +187,7 @@ class _Builder:
         for _ in range(n):
             a, d = self.rng.uniform(0, 2 * math.pi), self.rng.uniform(0, radius)
             sx, sy = self.rng.uniform(0.25, 0.6), self.rng.uniform(0.25, 0.6)
-            sz = self.rng.uniform(MIN_OBSTACLE_H, max_h)
+            sz = self.rng.uniform(BLOCK_MIN_H, max_h)
             self.box('rubble', (sx, sy, sz),
                      (x + d * math.cos(a), y + d * math.sin(a), sz / 2,
                       self.rng.uniform(-0.25, 0.25), self.rng.uniform(-0.25, 0.25),
@@ -220,14 +226,71 @@ class _Builder:
         self.footprints.append(Footprint(cx, cy, yaw, length, out + t))
         self.blobs.append((cx, cy, max(length, out) / 2))
 
-    def fallen_beam(self, room):
-        length = self.rng.uniform(1.5, 3.0)
-        p = self.sample_free(room, length / 2, passage_clear=0.9)
+    def fallen_beam(self, room, thin=False):
+        """Thick beams block; thin ones (a fallen joist) can be climbed."""
+        length = self.rng.uniform(1.2, 2.4) if thin else self.rng.uniform(1.5, 3.0)
+        # Thin beams may lie across a doorway: the robot climbs over them.
+        p = self.sample_free(room, length / 2, passage_clear=0.0 if thin else 0.9)
         if p is None:
             return
         yaw = self.rng.uniform(-math.pi, math.pi)
-        self.box('beam', (length, 0.3, 0.3), (p[0], p[1], 0.15, 0, 0, yaw), BEAM_COLOR)
+        if thin:
+            h = self.rng.uniform(0.09, CLIMB_MAX_H)
+            self.box('joist', (length, 0.15, h), (p[0], p[1], h / 2, 0, 0, yaw),
+                     (0.45, 0.36, 0.26), climbable=True)
+        else:
+            self.box('beam', (length, 0.3, 0.3), (p[0], p[1], 0.15, 0, 0, yaw), BEAM_COLOR)
         self.blobs.append((p[0], p[1], length / 2))
+
+    def low_debris(self, room):
+        """Loose low blocks: climbable."""
+        p = self.sample_free(room, 0.35, clear=0.25, passage_clear=0.6)
+        if p is None:
+            return
+        h = self.rng.uniform(0.05, CLIMB_MAX_H)
+        self.box('block', (self.rng.uniform(0.3, 0.6), self.rng.uniform(0.3, 0.6), h),
+                 (p[0], p[1], h / 2, 0, 0, self.rng.uniform(-math.pi, math.pi)),
+                 self.rubble_color(), climbable=True)
+        self.blobs.append((p[0], p[1], 0.35))
+
+    def gravel(self, room):
+        """A field of small rubble: rough, climbable ground."""
+        r = self.rng.uniform(0.6, 1.0)
+        p = self.sample_free(room, r, clear=0.1, passage_clear=0.3)
+        if p is None:
+            return
+        for _ in range(self.rng.randint(20, 35)):
+            a, d = self.rng.uniform(0, 2 * math.pi), r * math.sqrt(self.rng.random())
+            size, h = self.rng.uniform(0.06, 0.15), self.rng.uniform(0.03, 0.07)
+            self.box('gravel', (size, size * self.rng.uniform(0.6, 1.0), h),
+                     (p[0] + d * math.cos(a), p[1] + d * math.sin(a), h / 2, 0, 0,
+                      self.rng.uniform(-math.pi, math.pi)),
+                     self.rubble_color(), climbable=True)
+        self.blobs.append((p[0], p[1], r))
+
+    def mound(self, room):
+        """Rubble mound with a flat top and gentle ramps on two sides: climbable, but its
+        un-ramped sides are drops a traversability map has to notice."""
+        h = self.rng.uniform(0.18, 0.24)
+        top, width = self.rng.uniform(0.8, 1.2), self.rng.uniform(1.0, 1.3)
+        run = h / math.tan(math.radians(self.rng.uniform(13, 17)))
+        half = top / 2 + run
+        p = self.sample_free(room, half, passage_clear=0.9)
+        if p is None:
+            return
+        yaw = self.rng.uniform(-math.pi, math.pi)
+        c, s = math.cos(yaw), math.sin(yaw)
+        color = self.rubble_color()
+        self.box('mound', (top, width, h), (p[0], p[1], h / 2, 0, 0, yaw), color, climbable=True)
+        slope = math.atan2(h, run)
+        t = 0.04
+        for side in (1, -1):
+            d = side * (top / 2 + run / 2)
+            self.box('ramp', (math.hypot(run, h) + 0.04, width, t),
+                     (p[0] + d * c, p[1] + d * s, h / 2 - t / 2, 0, side * slope, yaw),
+                     color, footprint=False)
+        self.footprints.append(Footprint(p[0], p[1], yaw, top + 2 * run, width, True))
+        self.blobs.append((p[0], p[1], half))
 
     # ---- victims ----------------------------------------------------------
     def place_victim(self, vid, kind, room):
@@ -355,15 +418,19 @@ def _flood(blocked, start):
 
 
 def _check(b: _Builder, layout: Layout):
-    """Every room and every victim must be reachable (or, if buried, observable) from the spawn."""
+    """Every room and every victim must be reachable (or, if buried, observable) from the
+    spawn, climbing over climbable debris where needed."""
     ox, oy = -2.0, -3.5
     shape = (int((b.height + 5.5) / GRID_RES), int((b.width + 4.0) / GRID_RES))
-    grid = _rasterize(b.footprints, (ox, oy), shape)
-    inflated = _rasterize(b.footprints, (ox, oy), shape, grow=ROBOT_RADIUS)
+    blocking = [f for f in b.footprints if not f.climbable]
+    grid = _rasterize(blocking, (ox, oy), shape)
+    climbable = _rasterize([f for f in b.footprints if f.climbable], (ox, oy), shape) & ~grid
+    inflated = _rasterize(blocking, (ox, oy), shape, grow=ROBOT_RADIUS)
     sx, sy, _ = layout.spawns[0]
     start = (int((sy - oy) / GRID_RES), int((sx - ox) / GRID_RES))
     reach = _flood(inflated, start)
-    layout.grid, layout.reachable, layout.grid_origin = grid, reach, (ox, oy)
+    layout.grid, layout.climbable, layout.reachable = grid, climbable, reach
+    layout.grid_origin = (ox, oy)
 
     def cells_near(x, y, r):
         i0, i1 = int((x - r - ox) / GRID_RES), int((x + r - ox) / GRID_RES)
@@ -467,12 +534,16 @@ def _try(seed, attempt, cols, rows, room_w, room_h, n_visible, n_buried, n_decoy
             p = b.sample_free(room, 0.9, passage_clear=1.0)
             if p:
                 b.rubble_pile(p[0], p[1], rng.uniform(0.4, 0.8), rng.randint(5, 10))
-        for _ in range(rng.randint(2, 5)):
-            p = b.sample_free(room, 0.25, clear=0.3, passage_clear=0.8)
-            if p:
-                b.rubble_pile(p[0], p[1], 0.05, 1, max_h=0.4)
+        if rng.random() < 0.35:
+            b.mound(room)
+        if rng.random() < 0.4:
+            b.fallen_beam(room, thin=True)
+        if rng.random() < 0.4:
+            b.gravel(room)
+        for _ in range(rng.randint(1, 4)):
+            b.low_debris(room)
 
-    spawns = [(ex + (k - (n_robots - 1) / 2) * 0.7, -1.5, math.pi / 2) for k in range(n_robots)]
+    spawns = [(ex + (k - (n_robots - 1) / 2) * 1.0, -2.0, math.pi / 2) for k in range(n_robots)]
     layout = Layout(seed, attempt, W, H, cols, rows, b.parts, b.footprints, victims, decoys,
                     (ex, 0.0, ENTRANCE_W), spawns, [tuple(d) for d in b.doors])
     _check(b, layout)
