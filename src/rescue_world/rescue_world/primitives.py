@@ -8,12 +8,14 @@ from dataclasses import dataclass
 class Part:
     """A single primitive: rendered, optionally collidable, optionally warm."""
     name: str
-    shape: str                 # box | sphere | cylinder
-    size: tuple                # box (sx, sy, sz) | sphere (r,) | cylinder (r, length)
+    shape: str                 # box | sphere | cylinder | mesh
+    # box (sx, sy, sz) | sphere (r,) | cylinder (r, length) | mesh (uri, pbr_albedo_uri or None)
+    size: tuple
     pose: tuple                # x y z roll pitch yaw
     color: tuple
     temperature: float | None = None
     collide: bool = True
+    visible: bool = True       # False: collision-only (e.g. a box around a mesh)
 
 
 @dataclass

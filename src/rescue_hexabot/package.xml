@@ -3,7 +3,7 @@
 <package format="3">
   <name>rescue_hexabot</name>
   <version>0.1.0</version>
-  <description>RHex-style hexabot: Gazebo tripod-gait plugin and legged odometry node.</description>
+  <description>18-DOF spider hexapod: Gazebo IK walking-gait plugin and legged odometry node.</description>
   <maintainer email="bhavarthkokane25@gmail.com">bhavarth</maintainer>
   <license>Apache-2.0</license>
 

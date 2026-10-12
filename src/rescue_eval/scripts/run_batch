@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Run headless missions over several seeds and summarise the scores.
+#   run_batch [seeds...]        default: 1 2 3 4 5
+# Env: ROBOTS (3), TIME_LIMIT (900 s). Reports go to ~/rescue_reports/.
+set -u
+ROBOTS=${ROBOTS:-3}
+TIME_LIMIT=${TIME_LIMIT:-900}
+SEEDS=${*:-1 2 3 4 5}
+mkdir -p ~/rescue_reports
+for seed in $SEEDS; do
+  echo "=== seed $seed: $ROBOTS robots, limit ${TIME_LIMIT}s"
+  # Own process group, cleared afterwards, so nothing from one seed survives into the next.
+  setsid timeout $((TIME_LIMIT + 400)) ros2 launch rescue_bringup mission.launch.py seed:=$seed \
+    num_robots:=$ROBOTS gui:=false rviz:=false dashboard:=false auto_start:=true evaluate:=true \
+    time_limit:=$TIME_LIMIT > ~/rescue_reports/seed${seed}_${ROBOTS}robots.log 2>&1 &
+  pid=$!
+  wait $pid
+  kill -INT -- -$pid 2>/dev/null; sleep 5; kill -KILL -- -$pid 2>/dev/null
+done
+python3 - "$ROBOTS" $SEEDS <<'PY'
+import json, os, sys
+robots, seeds = sys.argv[1], sys.argv[2:]
+rows, tot = [], {'found': 0, 'total': 0, 'fp': 0}
+for s in seeds:
+    p = os.path.expanduser(f'~/rescue_reports/seed{s}_{robots}robots.json')
+    if not os.path.exists(p):
+        rows.append(f'| {s} | no result (see the .log) | | | | |')
+        continue
+    r = json.load(open(p))
+    v = r['victims']
+    tot['found'] += v['found']; tot['total'] += v['total']; tot['fp'] += v['false_positives']
+    home = sum(rb['back_at_start'] for rb in r['robots'].values())
+    rows.append(f"| {s} | {v['found']}/{v['total']} ({v['by_kind']['visible']['found']}/{v['by_kind']['visible']['total']} visible, "
+                f"{v['by_kind']['buried']['found']}/{v['by_kind']['buried']['total']} buried) | {v['false_positives']} | "
+                f"{100 * r['coverage_of_floor']:.0f} % | {r['mission_time_s'] / 60:.1f} min | {home}/{len(r['robots'])} |")
+out = ['| seed | victims found | false pos. | floor covered | time | robots home |', '|---|---|---|---|---|---|'] + rows
+out.append(f"\nTotal: {tot['found']}/{tot['total']} victims, {tot['fp']} false positives.")
+text = '\n'.join(out)
+print(text)
+open(os.path.expanduser(f'~/rescue_reports/summary_{robots}robots.md'), 'w').write(text + '\n')
+PY

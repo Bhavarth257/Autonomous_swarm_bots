@@ -6,7 +6,7 @@ Pure geometry, no ROS or SDF: ``generate_layout`` returns a ``Layout`` that
 Frame: the building spans [0, width] x [0, height] metres, the entrance is a
 gap in the south wall (y = 0) and the robots spawn just outside it.
 
-Obstacles come in two classes for the RHex-style hexabots:
+Obstacles come in two classes for the walking hexapods:
   climbable  low blocks, thin beams, gravel, ramped rubble mounds (<= CLIMB_MAX_H steps)
   blocking   walls, tall rubble piles, leaning slabs, tall beams, victims, buried-victim piles
 """
@@ -26,9 +26,9 @@ WALL_T = 0.2           # wall thickness
 WALL_H = 2.2           # intact wall height
 DOOR_W = 1.0
 ENTRANCE_W = 1.4
-ROBOT_RADIUS = 0.28    # used to inflate blocking obstacles for the reachability check
+ROBOT_RADIUS = 0.30    # used to inflate blocking obstacles for the reachability check
 GRID_RES = 0.05
-CLIMB_MAX_H = 0.13     # tallest step generated as climbable (hexabot manages ~0.16)
+CLIMB_MAX_H = 0.12     # tallest step generated as climbable (tested on the gait course)
 BLOCK_MIN_H = 0.28     # shortest obstacle generated as blocking
 
 CONCRETE = (0.58, 0.57, 0.55)
@@ -92,8 +92,9 @@ def _seg_dist(px, py, ax, ay, bx, by):
 
 
 class _Builder:
-    def __init__(self, rng: random.Random, cols, rows, room_w, room_h):
+    def __init__(self, rng: random.Random, cols, rows, room_w, room_h, victim_style='primitive'):
         self.rng = rng
+        self.victim_style = victim_style
         self.cols, self.rows = cols, rows
         self.cw, self.rh = room_w, room_h
         self.width, self.height = cols * room_w, rows * room_h
@@ -308,11 +309,12 @@ class _Builder:
         else:
             x, y, yaw = spot
         v = Victim(vid, kind, posture, x, y, yaw, room,
-                   humans.build(posture, rng, warm=True))
+                   humans.build(posture, rng, warm=True, style=self.victim_style))
         c, s = math.cos(yaw), math.sin(yaw)
         if posture == 'lying':
             # Body axis is local x: head reaches +0.66, feet -1.1.
-            self.footprints.append(Footprint(x - 0.22 * c, y - 0.22 * s, yaw, 1.8, 0.6))
+            width = 1.4 if self.victim_style == 'randy' else 0.6   # Randy lies with arms out
+            self.footprints.append(Footprint(x - 0.22 * c, y - 0.22 * s, yaw, 1.8, width))
             self.blobs.append((x - 0.22 * c, y - 0.22 * s, 0.95))
         else:
             # Back against the wall, legs along local +x to ~1.0.
@@ -450,20 +452,25 @@ def _check(b: _Builder, layout: Layout):
 
 
 def generate_layout(seed=0, cols=3, rows=3, room_w=6.0, room_h=5.0,
-                    n_visible=4, n_buried=2, n_decoys=1, n_robots=3, max_attempts=50) -> Layout:
+                    n_visible=4, n_buried=2, n_decoys=1, n_robots=3, max_attempts=50,
+                    victim_style='auto') -> Layout:
+    """victim_style: 'randy' (Fuel mannequin meshes), 'primitive', or 'auto' (randy if cached)."""
+    if victim_style == 'auto':
+        victim_style = 'randy' if humans.randy_available() else 'primitive'
     last = None
     for attempt in range(max_attempts):
         try:
             return _try(seed, attempt, cols, rows, room_w, room_h,
-                        n_visible, n_buried, n_decoys, n_robots)
+                        n_visible, n_buried, n_decoys, n_robots, victim_style)
         except LayoutError as e:
             last = e
     raise LayoutError(f'seed {seed}: no valid layout in {max_attempts} attempts ({last})')
 
 
-def _try(seed, attempt, cols, rows, room_w, room_h, n_visible, n_buried, n_decoys, n_robots):
+def _try(seed, attempt, cols, rows, room_w, room_h, n_visible, n_buried, n_decoys, n_robots,
+         victim_style):
     rng = random.Random(seed * 1000 + attempt)
-    b = _Builder(rng, cols, rows, room_w, room_h)
+    b = _Builder(rng, cols, rows, room_w, room_h, victim_style)
     W, H = b.width, b.height
 
     # Outer shell: entrance centred in the south wall.

@@ -3,7 +3,7 @@
 <package format="3">
   <name>rescue_description</name>
   <version>0.1.0</version>
-  <description>URDF of the RHex-style rescue hexabot (six C-legs, 3D lidar, RGB camera, IMU).</description>
+  <description>URDF of the 18-DOF spider hexapod rescue robot (3D lidar, RGB camera, IMU).</description>
   <maintainer email="bhavarthkokane25@gmail.com">bhavarth</maintainer>
   <license>Apache-2.0</license>
 

@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Legged odometry for a hexabot.
+"""Legged odometry for a hexapod.
 
-A real RHex estimates its motion from leg kinematics and an IMU: roll, pitch and
-body height are accurate, while x, y and yaw drift (leg slip, stride scale error,
+A real hexapod estimates its motion from leg kinematics and an IMU: roll, pitch and
+body height are accurate, while x, y and yaw drift (foot slip, stride scale error,
 gyro bias). This node reproduces that from the simulator's ground-truth pose:
 
   in   ground_truth/odom                       (Gazebo OdometryPublisher, 3D)
   out  odom                                    nav_msgs/Odometry, odom -> base_footprint
        TF <ns>/odom -> <ns>/base_footprint     gravity-aligned: x y z yaw (drifting)
        TF <ns>/base_footprint -> <ns>/base_link   roll, pitch, body height (accurate)
+       odom/tilt  geometry_msgs/QuaternionStamped: the same roll/pitch with the odometry
+                  stamp, for nodes that need the body attitude at an exact time
 
 Odometry starts at zero where the robot spawns.
 """
 import math
 import random
+import zlib
 
 import rclpy
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import QuaternionStamped, TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from tf2_ros import TransformBroadcaster
@@ -46,9 +49,10 @@ class HexabotOdom(Node):
         super().__init__('hexabot_odom')
         ns = self.get_namespace().strip('/')
         self.prefix = f'{ns}/' if ns else ''
-        self.body_height = self.declare_parameter('body_height', 0.17).value
+        self.body_height = self.declare_parameter('body_height', 0.15).value
         drift = self.declare_parameter('drift', True).value
-        rng = random.Random(self.declare_parameter('seed', hash(ns) & 0xffff).value)
+        # Deterministic per robot name, so runs are repeatable.
+        rng = random.Random(self.declare_parameter('seed', zlib.crc32(ns.encode())).value)
         # Fixed per-robot errors (calibration) plus per-step noise.
         self.scale = 1.0 + (rng.gauss(0, 0.02) if drift else 0.0)
         self.yaw_scale = 1.0 + (rng.gauss(0, 0.015) if drift else 0.0)
@@ -63,6 +67,7 @@ class HexabotOdom(Node):
 
         self.tf = TransformBroadcaster(self)
         self.pub = self.create_publisher(Odometry, 'odom', 20)
+        self.pub_tilt = self.create_publisher(QuaternionStamped, 'odom/tilt', 20)
         self.create_subscription(Odometry, 'ground_truth/odom', self.on_gt, 20)
 
     def on_gt(self, msg: Odometry):
@@ -127,6 +132,11 @@ class HexabotOdom(Node):
             out.pose.covariance[i * 7] = var
             out.twist.covariance[i * 7] = var
         self.pub.publish(out)
+        tilt = QuaternionStamped()
+        tilt.header.stamp = stamp
+        tilt.header.frame_id = tilt_tf.header.frame_id
+        tilt.quaternion = tilt_tf.transform.rotation
+        self.pub_tilt.publish(tilt)
 
 
 def main():

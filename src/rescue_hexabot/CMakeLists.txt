@@ -14,14 +14,14 @@ find_package(ignition-plugin1 REQUIRED COMPONENTS register)
 find_package(ignition-transport11 REQUIRED)
 find_package(ignition-msgs8 REQUIRED)
 
-# Gazebo system plugin: tripod gait for the six C-legs.
-add_library(RescueHexGait SHARED src/HexGait.cc)
-target_link_libraries(RescueHexGait
+# Gazebo system plugin: IK tripod walking gait for the 18-DOF hexapod.
+add_library(RescueHexWalk SHARED src/HexWalk.cc)
+target_link_libraries(RescueHexWalk
   ignition-gazebo6::ignition-gazebo6
   ignition-plugin1::register
   ignition-transport11::ignition-transport11
   ignition-msgs8::ignition-msgs8)
-install(TARGETS RescueHexGait LIBRARY DESTINATION lib)
+install(TARGETS RescueHexWalk LIBRARY DESTINATION lib)
 
 install(PROGRAMS scripts/hexabot_odom DESTINATION lib/${PROJECT_NAME})
 

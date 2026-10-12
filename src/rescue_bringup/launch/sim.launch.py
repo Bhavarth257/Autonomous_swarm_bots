@@ -1,15 +1,16 @@
-"""Collapsed-building world + N rescue hexabots in Gazebo Fortress.
+"""Collapsed-building world + N rescue hexapods in Gazebo Fortress.
 
   ros2 launch rescue_bringup sim.launch.py seed:=4 num_robots:=3 gui:=true rviz:=true
 
 The world is generated from `seed` (same seed -> same building and victims) into
-~/.ros/rescue_worlds/. Each hexabot rN gets:
-  /rN/cmd_vel                 drive command (tripod gait plugin)
+~/.ros/rescue_worlds/. Each hexapod rN gets:
+  /rN/cmd_vel                 walk command: linear.x, linear.y (crab walk), angular.z
   /rN/odom                    drifting legged odometry (hexabot_odom)
   /rN/lidar/points            16-ring 3D lidar
   /rN/scan                    2D scan cut from the cloud 0.25-1.5 m above the ground
                               (walls and tall rubble only; climbable debris is below it)
-  /rN/imu /rN/camera/{image_raw,camera_info} /rN/joint_states
+  /rN/imu /rN/camera/{image_raw,camera_info} /rN/thermal/{image_raw,camera_info}
+  /rN/joint_states
   /rN/ground_truth/odom       simulator pose, for scoring only
 and TF frames rN/odom -> rN/base_footprint -> rN/base_link -> ... on the shared /tf.
 
@@ -22,8 +23,10 @@ import os
 import xacro
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction,
-                            SetEnvironmentVariable)
+from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription,
+                            OpaqueFunction, RegisterEventHandler, SetEnvironmentVariable,
+                            UnsetEnvironmentVariable)
+from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -32,17 +35,17 @@ from rescue_bringup import rviz_config
 from rescue_world.generate import DEFAULT_OUT, generate
 
 
-def _robot(ns, spawn, description, slam):
+def _robot(ns, spawn, description, slam, odom_drift):
     sim_time = {'use_sim_time': True}
     actions = [
         Node(package='robot_state_publisher', executable='robot_state_publisher', namespace=ns,
              parameters=[{'robot_description': description, 'frame_prefix': f'{ns}/', **sim_time}]),
         Node(package='ros_gz_sim', executable='create', output='screen',
              arguments=['-name', ns, '-topic', f'/{ns}/robot_description',
-                        '-x', str(spawn['x']), '-y', str(spawn['y']), '-z', '0.2',
+                        '-x', str(spawn['x']), '-y', str(spawn['y']), '-z', '0.25',
                         '-Y', str(spawn['yaw'])]),
         Node(package='rescue_hexabot', executable='hexabot_odom', namespace=ns,
-             parameters=[sim_time]),
+             parameters=[{'body_height': 0.15, 'drift': odom_drift, **sim_time}]),
         Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
              name='cloud_to_scan', namespace=ns,
              remappings=[('cloud_in', 'lidar/points'), ('scan', 'scan')],
@@ -73,13 +76,15 @@ def _bridge_topics(ns):
         f'/{ns}/imu@sensor_msgs/msg/Imu[ignition.msgs.IMU',
         f'/{ns}/camera/image_raw@sensor_msgs/msg/Image[ignition.msgs.Image',
         f'/{ns}/camera/camera_info@sensor_msgs/msg/CameraInfo[ignition.msgs.CameraInfo',
+        f'/{ns}/thermal/image_raw@sensor_msgs/msg/Image[ignition.msgs.Image',
+        f'/{ns}/thermal/camera_info@sensor_msgs/msg/CameraInfo[ignition.msgs.CameraInfo',
     ]
 
 
 def _setup(context):
     arg = lambda name: LaunchConfiguration(name).perform(context)  # noqa: E731
     seed, n = int(arg('seed')), int(arg('num_robots'))
-    gui, rviz, slam = (arg(k) == 'true' for k in ('gui', 'rviz', 'slam'))
+    gui, rviz, slam, drift = (arg(k) == 'true' for k in ('gui', 'rviz', 'slam', 'odom_drift'))
 
     paths = generate(seed=seed, out_dir=DEFAULT_OUT, n_robots=max(n, 3))
     with open(paths['json']) as f:
@@ -91,14 +96,19 @@ def _setup(context):
             get_package_share_directory('ros_gz_sim'), 'launch', 'gz_sim.launch.py')),
         launch_arguments={'gz_args': f'-r {"" if gui else "-s "}{paths["sdf"]}'}.items())
 
+    # Gazebo's server can outlive a launch that shuts itself down (e.g. after an
+    # evaluation); make sure this world's server goes with it.
+    stop_gz = RegisterEventHandler(OnShutdown(on_shutdown=[ExecuteProcess(
+        cmd=['pkill', '-INT', '-f', f'gazebo -r .*{paths["sdf"]}'], output='log')]))
+
     xacro_file = os.path.join(get_package_share_directory('rescue_description'),
                               'urdf', 'hexabot.urdf.xacro')
     namespaces = [f'r{k + 1}' for k in range(n)]
-    actions = [gz]
+    actions = [gz, stop_gz]
     bridge_args = ['/clock@rosgraph_msgs/msg/Clock[ignition.msgs.Clock']
     for k, ns in enumerate(namespaces):
         description = xacro.process_file(xacro_file, mappings={'ns': ns}).toxml()
-        actions += _robot(ns, gt['spawns'][k], description, slam)
+        actions += _robot(ns, gt['spawns'][k], description, slam, drift)
         bridge_args += _bridge_topics(ns)
 
     actions.append(Node(package='ros_gz_bridge', executable='parameter_bridge', name='gz_bridge',
@@ -114,19 +124,41 @@ def _setup(context):
 
 
 NVIDIA_EGL = '/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
+SNAP_GTK_VARS = ['GTK_PATH', 'GTK_EXE_PREFIX', 'GTK_IM_MODULE_FILE', 'GIO_MODULE_DIR',
+                 'GDK_PIXBUF_MODULE_FILE', 'GDK_PIXBUF_MODULEDIR', 'GSETTINGS_SCHEMA_DIR', 'LOCPATH']
+
+
+def _clean_env():
+    actions = []
+    # Hybrid laptops: make headless rendering go straight to the NVIDIA EGL driver
+    # instead of trying Mesa first ("failed to create dri2 screen").
+    if os.path.exists(NVIDIA_EGL):
+        actions.append(SetEnvironmentVariable('__EGL_VENDOR_LIBRARY_FILENAMES', NVIDIA_EGL))
+    # Gazebo transport discovers peers by multicast on the default network interface;
+    # if Wi-Fi drops mid-run the bridge loses Gazebo and the clock freezes. Everything
+    # runs on this machine, so keep it on loopback (unless the user chose otherwise).
+    if 'IGN_IP' not in os.environ:
+        actions.append(SetEnvironmentVariable('IGN_IP', '127.0.0.1'))
+    # A terminal inside snap-packaged VS Code leaks the snap's GTK paths, and RViz then
+    # loads the snap's libpthread and dies ("undefined symbol: __libc_pthread_init").
+    if os.environ.get('SNAP_NAME') == 'code':
+        actions += [UnsetEnvironmentVariable(v) for v in SNAP_GTK_VARS if v in os.environ]
+        for v in ('XDG_DATA_DIRS', 'XDG_CONFIG_DIRS'):
+            orig = os.environ.get(f'{v}_VSCODE_SNAP_ORIG')
+            if orig is not None:
+                actions.append(SetEnvironmentVariable(v, orig))
+    return actions
 
 
 def generate_launch_description():
-    # Hybrid laptops: make headless rendering go straight to the NVIDIA EGL driver
-    # instead of trying Mesa first ("failed to create dri2 screen").
-    gpu_env = [SetEnvironmentVariable('__EGL_VENDOR_LIBRARY_FILENAMES', NVIDIA_EGL)] \
-        if os.path.exists(NVIDIA_EGL) else []
-    return LaunchDescription(gpu_env + [
+    return LaunchDescription(_clean_env() + [
         DeclareLaunchArgument('seed', default_value='0', description='world seed'),
         DeclareLaunchArgument('num_robots', default_value='1'),
         DeclareLaunchArgument('gui', default_value='true', description='Gazebo GUI'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('slam', default_value='false',
                               description='true once SLAM provides map -> odom'),
+        DeclareLaunchArgument('odom_drift', default_value='true',
+                              description='false: odometry equals ground truth (debugging)'),
         OpaqueFunction(function=_setup),
     ])

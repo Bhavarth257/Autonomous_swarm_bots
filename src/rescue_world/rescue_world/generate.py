@@ -127,10 +127,13 @@ def main(argv=None):
     p.add_argument('--buried', type=int, default=2, help='victims under debris (thermal only)')
     p.add_argument('--decoys', type=int, default=1, help='hot non-human debris')
     p.add_argument('--robots', type=int, default=3)
+    p.add_argument('--victims', choices=['auto', 'randy', 'primitive'], default='auto',
+                   help='victim models: Rescue Randy meshes (needs the Fuel download) or primitives')
     a = p.parse_args(argv)
     paths = generate(seed=a.seed, out_dir=a.out_dir, name=a.name, n_robots=a.robots,
                      cols=a.cols, rows=a.rows, room_w=a.room_w, room_h=a.room_h,
-                     n_visible=a.visible, n_buried=a.buried, n_decoys=a.decoys)
+                     n_visible=a.visible, n_buried=a.buried, n_decoys=a.decoys,
+                     victim_style=a.victims)
     with open(paths['json']) as f:
         gt = json.load(f)
     print(f"world:   {paths['sdf']}")

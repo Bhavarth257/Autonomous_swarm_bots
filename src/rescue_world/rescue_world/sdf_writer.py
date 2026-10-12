@@ -9,6 +9,8 @@ def _f(*vals):
 
 
 def _geometry(p):
+    if p.shape == 'mesh':
+        return f'<mesh><uri>{p.size[0]}</uri></mesh>'
     if p.shape == 'box':
         return f'<box><size>{_f(*p.size)}</size></box>'
     if p.shape == 'sphere':
@@ -24,9 +26,14 @@ def _part(p):
         thermal = ('<plugin filename="ignition-gazebo-thermal-system" '
                    'name="ignition::gazebo::systems::Thermal">'
                    f'<temperature>{p.temperature:.1f}</temperature></plugin>')
-    out = (f'<visual name="{p.name}_v"><pose>{_f(*p.pose)}</pose><geometry>{geom}</geometry>'
-           f'<material><ambient>{col} 1</ambient><diffuse>{col} 1</diffuse>'
-           f'<specular>0.05 0.05 0.05 1</specular></material>{thermal}</visual>')
+    pbr = ''
+    if p.shape == 'mesh' and p.size[1]:
+        pbr = f'<pbr><metal><albedo_map>{p.size[1]}</albedo_map></metal></pbr>'
+    out = ''
+    if p.visible:
+        out = (f'<visual name="{p.name}_v"><pose>{_f(*p.pose)}</pose><geometry>{geom}</geometry>'
+               f'<material><ambient>{col} 1</ambient><diffuse>{col} 1</diffuse>'
+               f'<specular>0.05 0.05 0.05 1</specular>{pbr}</material>{thermal}</visual>')
     if p.collide:
         out += f'<collision name="{p.name}_c"><pose>{_f(*p.pose)}</pose><geometry>{geom}</geometry></collision>'
     return out
@@ -80,7 +87,8 @@ def to_sdf(layout: Layout, world_name='collapsed_building') -> str:
     <link name="link">
       <collision name="c"><geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry></collision>
       <visual name="v"><geometry><plane><normal>0 0 1</normal><size>200 200</size></plane></geometry>
-        <material><ambient>0.48 0.46 0.42 1</ambient><diffuse>0.48 0.46 0.42 1</diffuse><specular>0.02 0.02 0.02 1</specular></material>
+        <material><ambient>0.48 0.46 0.42 1</ambient><diffuse>0.48 0.46 0.42 1</diffuse>
+          <specular>0.02 0.02 0.02 1</specular></material>
       </visual>
     </link>
   </model>

@@ -1,124 +1,181 @@
 <?xml version="1.0"?>
 <!--
-  RHex-style search hexabot: rigid body with six rotating half-circle C-legs.
+  Spider hexapod search robot, 18 DOF, styled after hobby hexapod kits: black stacked
+  body plates, red servos at every joint, front sensor head.
 
-  Legs turn about their hip axis (+y); theta = 0 means the leg points straight down.
-  The rescue_hexabot HexGait plugin runs an alternating-tripod gait from /<ns>/cmd_vel.
-  It can climb obstacles up to about hip height (~0.16 m).
+  Leg chain: base_link -(coxa, yaw)- coxa -(femur, pitch)- femur -(tibia, pitch)- tibia.
+  Each leg frame has x pointing outward; at zero angles the leg is straight and level.
+  Femur/tibia joint axes are -y, so positive angles lift the leg.
+  The rescue_hexabot HexWalk plugin computes IK and walks it from /<ns>/cmd_vel.
 
   Every topic and TF frame is prefixed with `ns` so several robots share one world
-  and one /tf tree (r1/base_link, r2/base_link, ...). The odometry TF
-  (odom -> base_footprint -> base_link) comes from the hexabot_odom node, not from
-  this URDF, so base_link is the root here.
+  and one /tf tree. The odometry TF (odom -> base_footprint -> base_link) comes from
+  the hexabot_odom node, so base_link is the root here.
 -->
 <robot name="hexabot" xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:arg name="ns" default="r1"/>
   <xacro:arg name="sensors" default="true"/>  <!-- false: no rendering sensors (tests) -->
   <xacro:property name="ns" value="$(arg ns)"/>
 
-  <xacro:property name="body_l" value="0.54"/>
-  <xacro:property name="body_w" value="0.24"/>
-  <xacro:property name="body_h" value="0.08"/>
-  <xacro:property name="hip_x" value="0.22"/>     <!-- front/rear hip offset from centre -->
-  <xacro:property name="hip_y" value="0.150"/>    <!-- leg plane, outside the body -->
-  <xacro:property name="hip_z" value="-0.02"/>    <!-- hip axis below body centre -->
-  <xacro:property name="leg_r" value="0.15"/>     <!-- foot arc radius about the hip -->
-  <xacro:property name="leg_arc0" value="-145"/>  <!-- foot arc ends (deg, -90 = down) -->
-  <xacro:property name="leg_arc1" value="-35"/>
-  <xacro:property name="stance_deg" value="90"/>
-  <xacro:property name="duty" value="0.55"/>
-  <xacro:property name="leg_t" value="0.014"/>    <!-- leg tube radius -->
+  <!-- body -->
+  <xacro:property name="body_l" value="0.34"/>
+  <xacro:property name="body_w" value="0.20"/>
+  <xacro:property name="plate_gap" value="0.06"/>   <!-- distance between the two body plates -->
+  <!-- legs -->
+  <xacro:property name="coxa_l" value="0.05"/>
+  <xacro:property name="femur_l" value="0.11"/>
+  <xacro:property name="tibia_l" value="0.20"/>  <!-- longer than the femur: knee sits high, like the kit -->
+  <xacro:property name="mount_fx" value="0.13"/>    <!-- front/rear leg mounts -->
+  <xacro:property name="mount_fy" value="0.08"/>
+  <xacro:property name="mount_my" value="0.10"/>    <!-- middle leg mount -->
+  <!-- stance -->
+  <xacro:property name="stand_height" value="0.15"/>
+  <xacro:property name="stand_reach" value="0.14"/>
 
-  <material name="body"><color rgba="0.85 0.33 0.05 1"/></material>
-  <material name="dark"><color rgba="0.1 0.1 0.1 1"/></material>
-  <material name="rubber"><color rgba="0.18 0.18 0.2 1"/></material>
+  <material name="plate"><color rgba="0.16 0.16 0.18 1"/></material>
+  <material name="servo"><color rgba="1.0 0.38 0.55 1"/></material>
+  <material name="metal"><color rgba="0.7 0.7 0.72 1"/></material>
+  <material name="eye"><color rgba="0.15 0.35 0.95 1"/></material>
+  <material name="rubber"><color rgba="0.02 0.02 0.02 1"/></material>
 
-  <xacro:macro name="box_inertia" params="m x y z">
-    <inertial><mass value="${m}"/>
+  <xacro:macro name="box_inertia" params="m x y z *origin">
+    <inertial><xacro:insert_block name="origin"/><mass value="${m}"/>
       <inertia ixx="${m*(y*y+z*z)/12}" iyy="${m*(x*x+z*z)/12}" izz="${m*(x*x+y*y)/12}" ixy="0" ixz="0" iyz="0"/>
     </inertial>
   </xacro:macro>
+  <xacro:macro name="vbox" params="xyz rpy:='0 0 0' size mat">
+    <visual><origin xyz="${xyz}" rpy="${rpy}"/><geometry><box size="${size}"/></geometry><material name="${mat}"/></visual>
+  </xacro:macro>
 
   <!-- ===== body ===== -->
+  <xacro:macro name="body_plate" params="z">
+    <!-- Hexagon-ish plate: long centre strip plus a wider middle section. -->
+    <xacro:vbox xyz="0 0 ${z}" size="${body_l} ${body_w*0.7} 0.006" mat="plate"/>
+    <xacro:vbox xyz="0 0 ${z}" size="${body_l*0.5} ${body_w} 0.006" mat="plate"/>
+    <xacro:vbox xyz="${body_l*0.36} 0 ${z}" rpy="0 0 ${pi/4}" size="0.09 0.09 0.006" mat="plate"/>
+    <xacro:vbox xyz="${-body_l*0.36} 0 ${z}" rpy="0 0 ${pi/4}" size="0.09 0.09 0.006" mat="plate"/>
+  </xacro:macro>
+  <xacro:macro name="coxa_servo" params="x y yaw">
+    <xacro:vbox xyz="${x} ${y} 0" rpy="0 0 ${yaw}" size="0.045 0.032 0.045" mat="servo"/>
+  </xacro:macro>
+  <xacro:macro name="standoff" params="x y">
+    <visual><origin xyz="${x} ${y} 0"/><geometry><cylinder radius="0.004" length="${plate_gap}"/></geometry>
+      <material name="metal"/></visual>
+  </xacro:macro>
+
   <link name="base_link">
-    <visual><geometry><box size="${body_l} ${body_w} ${body_h}"/></geometry><material name="body"/></visual>
-    <visual><origin xyz="0 0 ${body_h/2 + 0.005}"/>
-      <geometry><box size="${body_l - 0.06} ${body_w - 0.04} 0.01"/></geometry><material name="dark"/></visual>
-    <collision><geometry><box size="${body_l} ${body_w} ${body_h}"/></geometry></collision>
-    <!-- Battery sits low and forward: lower, forward centre of mass resists flipping when climbing. -->
-    <inertial><origin xyz="0.03 0 -0.02"/><mass value="3.0"/>
-      <inertia ixx="${3.0*(body_w**2 + body_h**2)/12}" iyy="${3.0*(body_l**2 + body_h**2)/12}"
-               izz="${3.0*(body_l**2 + body_w**2)/12}" ixy="0" ixz="0" iyz="0"/></inertial>
+    <xacro:body_plate z="${-plate_gap/2}"/>
+    <xacro:body_plate z="${plate_gap/2}"/>
+    <xacro:coxa_servo x="${mount_fx}" y="${mount_fy}" yaw="${pi/4}"/>
+    <xacro:coxa_servo x="0" y="${mount_my}" yaw="${pi/2}"/>
+    <xacro:coxa_servo x="${-mount_fx}" y="${mount_fy}" yaw="${3*pi/4}"/>
+    <xacro:coxa_servo x="${mount_fx}" y="${-mount_fy}" yaw="${-pi/4}"/>
+    <xacro:coxa_servo x="0" y="${-mount_my}" yaw="${-pi/2}"/>
+    <xacro:coxa_servo x="${-mount_fx}" y="${-mount_fy}" yaw="${-3*pi/4}"/>
+    <xacro:standoff x="0.06" y="0.05"/>
+    <xacro:standoff x="0.06" y="-0.05"/>
+    <xacro:standoff x="-0.06" y="0.05"/>
+    <xacro:standoff x="-0.06" y="-0.05"/>
+    <!-- battery between the plates, controller board on top -->
+    <xacro:vbox xyz="-0.02 0 0" size="0.12 0.07 0.035" mat="plate"/>
+    <xacro:vbox xyz="-0.04 0 ${plate_gap/2 + 0.008}" size="0.09 0.06 0.01" mat="metal"/>
+    <!-- sensor head bracket -->
+    <xacro:vbox xyz="${body_l/2 + 0.005} 0 0.045" size="0.03 0.09 0.06" mat="plate"/>
+    <collision><geometry><box size="${body_l} ${body_w} ${plate_gap + 0.01}"/></geometry></collision>
+    <xacro:box_inertia m="2.2" x="${body_l}" y="${body_w}" z="${plate_gap}"><origin xyz="0 0 -0.01"/></xacro:box_inertia>
   </link>
-  <!-- Belly slides over debris instead of snagging on it. -->
   <gazebo reference="base_link"><mu1>0.3</mu1><mu2>0.3</mu2></gazebo>
 
-  <!-- ===== C-legs (whegs) ===== -->
-  <!-- Each leg is a spoke from the hip plus a foot arc centred on the hip axis, spanning
-       leg_arc0..leg_arc1 degrees (-90 = straight down). During stance the robot rolls on that
-       arc like a wheel, so the body stays level; the open side of the C hooks over edges
-       when the leg swings over the top, which is what lets it climb. -->
-  <xacro:macro name="tube" params="x0 z0 x1 z1">
-    <xacro:property name="seg_len" value="${sqrt((x1-x0)**2 + (z1-z0)**2)}"/>
-    <xacro:property name="seg_pitch" value="${atan2(x1-x0, z1-z0)}"/>
-    <visual><origin xyz="${(x0+x1)/2} 0 ${(z0+z1)/2}" rpy="0 ${seg_pitch} 0"/>
-      <geometry><cylinder radius="${leg_t}" length="${seg_len}"/></geometry><material name="rubber"/></visual>
-    <collision><origin xyz="${(x0+x1)/2} 0 ${(z0+z1)/2}" rpy="0 ${seg_pitch} 0"/>
-      <geometry><cylinder radius="${leg_t}" length="${seg_len}"/></geometry></collision>
-    <collision><origin xyz="${x1} 0 ${z1}"/><geometry><sphere radius="${leg_t}"/></geometry></collision>
-  </xacro:macro>
-  <xacro:macro name="arc_tube" params="a0 a1">
-    <xacro:tube x0="${leg_r*cos(radians(a0))}" z0="${leg_r*sin(radians(a0))}"
-                x1="${leg_r*cos(radians(a1))}" z1="${leg_r*sin(radians(a1))}"/>
-  </xacro:macro>
-
-  <xacro:macro name="leg" params="name x y">
-    <link name="${name}_leg">
-      <xacro:tube x0="0" z0="0" x1="${leg_r*cos(radians(leg_arc1))}" z1="${leg_r*sin(radians(leg_arc1))}"/>
-      <xacro:arc_tube a0="${leg_arc1}" a1="${leg_arc1 - 22}"/>
-      <xacro:arc_tube a0="${leg_arc1 - 22}" a1="${leg_arc1 - 44}"/>
-      <xacro:arc_tube a0="${leg_arc1 - 44}" a1="${leg_arc1 - 66}"/>
-      <xacro:arc_tube a0="${leg_arc1 - 66}" a1="${leg_arc1 - 88}"/>
-      <xacro:arc_tube a0="${leg_arc1 - 88}" a1="${leg_arc0}"/>
-      <inertial><origin xyz="0 0 ${-0.75*leg_r}"/><mass value="0.12"/>
-        <inertia ixx="6e-4" iyy="8e-4" izz="3e-4" ixy="0" ixz="0" iyz="0"/></inertial>
+  <!-- ===== legs ===== -->
+  <xacro:macro name="leg" params="name x y yaw">
+    <link name="${name}_coxa_link">
+      <xacro:vbox xyz="${coxa_l*0.6} 0 0" size="0.05 0.05 0.04" mat="servo"/>
+      <xacro:vbox xyz="${coxa_l/2} 0 0.024" size="${coxa_l + 0.02} 0.045 0.004" mat="plate"/>
+      <xacro:vbox xyz="${coxa_l/2} 0 -0.024" size="${coxa_l + 0.02} 0.045 0.004" mat="plate"/>
+      <xacro:box_inertia m="0.07" x="${coxa_l}" y="0.045" z="0.045"><origin xyz="${coxa_l/2} 0 0"/></xacro:box_inertia>
     </link>
-    <joint name="${name}_hip" type="continuous">
-      <parent link="base_link"/><child link="${name}_leg"/>
-      <origin xyz="${x} ${y} ${hip_z}"/>
-      <axis xyz="0 1 0"/>
-      <limit effort="8" velocity="30"/>
-      <dynamics damping="0.01"/>
+    <joint name="${name}_coxa" type="revolute">
+      <parent link="base_link"/><child link="${name}_coxa_link"/>
+      <origin xyz="${x} ${y} 0" rpy="0 0 ${yaw}"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="-1.0" upper="1.0" effort="6" velocity="12"/>
+      <dynamics damping="0.05"/>
     </joint>
-    <gazebo reference="${name}_leg"><mu1>1.2</mu1><mu2>1.2</mu2></gazebo>
+
+    <link name="${name}_femur_link">
+      <xacro:vbox xyz="${femur_l/2} 0.024 0" size="${femur_l + 0.03} 0.004 0.038" mat="plate"/>
+      <xacro:vbox xyz="${femur_l/2} -0.024 0" size="${femur_l + 0.03} 0.004 0.038" mat="plate"/>
+      <xacro:vbox xyz="${femur_l} 0 0" size="0.05 0.04 0.05" mat="servo"/>
+      <collision><origin xyz="${femur_l/2} 0 0"/><geometry><box size="${femur_l} 0.05 0.038"/></geometry></collision>
+      <xacro:box_inertia m="0.09" x="${femur_l}" y="0.05" z="0.04"><origin xyz="${femur_l*0.6} 0 0"/></xacro:box_inertia>
+    </link>
+    <joint name="${name}_femur" type="revolute">
+      <parent link="${name}_coxa_link"/><child link="${name}_femur_link"/>
+      <origin xyz="${coxa_l} 0 0"/>
+      <axis xyz="0 -1 0"/>
+      <limit lower="-1.4" upper="1.6" effort="8" velocity="12"/>
+      <dynamics damping="0.05"/>
+    </joint>
+
+    <link name="${name}_tibia_link">
+      <!-- wide near the knee, tapering to the foot, like the kit's tibia plates -->
+      <xacro:vbox xyz="${tibia_l*0.5} 0.014 0" size="${tibia_l} 0.005 0.04" mat="plate"/>
+      <xacro:vbox xyz="${tibia_l*0.5} -0.014 0" size="${tibia_l} 0.005 0.04" mat="plate"/>
+      <xacro:vbox xyz="${tibia_l*0.2} 0.014 0.014" size="${tibia_l*0.45} 0.005 0.07" mat="plate"/>
+      <xacro:vbox xyz="${tibia_l*0.2} -0.014 0.014" size="${tibia_l*0.45} 0.005 0.07" mat="plate"/>
+      <xacro:vbox xyz="${tibia_l*0.55} 0.018 0" size="${tibia_l*0.35} 0.003 0.012" mat="metal"/>
+      <xacro:vbox xyz="${tibia_l*0.55} -0.018 0" size="${tibia_l*0.35} 0.003 0.012" mat="metal"/>
+      <xacro:vbox xyz="${tibia_l - 0.012} 0 0" size="0.03 0.034 0.02" mat="plate"/>
+      <visual><origin xyz="${tibia_l} 0 0"/><geometry><sphere radius="0.017"/></geometry><material name="rubber"/></visual>
+      <collision><origin xyz="${tibia_l*0.45} 0 0"/><geometry><box size="${tibia_l*0.9} 0.03 0.03"/></geometry></collision>
+      <collision><origin xyz="${tibia_l} 0 0"/><geometry><sphere radius="0.016"/></geometry></collision>
+      <xacro:box_inertia m="0.07" x="${tibia_l}" y="0.01" z="0.04"><origin xyz="${tibia_l*0.4} 0 0"/></xacro:box_inertia>
+    </link>
+    <joint name="${name}_tibia" type="revolute">
+      <parent link="${name}_femur_link"/><child link="${name}_tibia_link"/>
+      <origin xyz="${femur_l} 0 0"/>
+      <axis xyz="0 -1 0"/>
+      <limit lower="-2.7" upper="0.5" effort="8" velocity="12"/>
+      <dynamics damping="0.05"/>
+    </joint>
+    <gazebo reference="${name}_tibia_link"><mu1>1.2</mu1><mu2>1.2</mu2></gazebo>
+    <gazebo reference="${name}_femur_link"><mu1>0.5</mu1><mu2>0.5</mu2></gazebo>
   </xacro:macro>
 
-  <xacro:leg name="lf" x="${hip_x}" y="${hip_y}"/>
-  <xacro:leg name="lm" x="0" y="${hip_y}"/>
-  <xacro:leg name="lr" x="${-hip_x}" y="${hip_y}"/>
-  <xacro:leg name="rf" x="${hip_x}" y="${-hip_y}"/>
-  <xacro:leg name="rm" x="0" y="${-hip_y}"/>
-  <xacro:leg name="rr" x="${-hip_x}" y="${-hip_y}"/>
+  <xacro:leg name="lf" x="${mount_fx}" y="${mount_fy}" yaw="${pi/4}"/>
+  <xacro:leg name="lm" x="0" y="${mount_my}" yaw="${pi/2}"/>
+  <xacro:leg name="lr" x="${-mount_fx}" y="${mount_fy}" yaw="${3*pi/4}"/>
+  <xacro:leg name="rf" x="${mount_fx}" y="${-mount_fy}" yaw="${-pi/4}"/>
+  <xacro:leg name="rm" x="0" y="${-mount_my}" yaw="${-pi/2}"/>
+  <xacro:leg name="rr" x="${-mount_fx}" y="${-mount_fy}" yaw="${-3*pi/4}"/>
 
   <!-- ===== sensors ===== -->
-  <!-- 16-ring 3D lidar, tilted field of view (-25..+15 deg) so it sees the floor from ~0.6 m. -->
+  <!-- 16-ring 3D lidar on a mast, high enough that the swinging knees stay inside its
+       minimum range; the tilted field of view (-25..+15 deg) sees the floor from ~0.6 m. -->
   <link name="lidar_link">
-    <visual><geometry><cylinder radius="0.04" length="0.05"/></geometry><material name="dark"/></visual>
-    <collision><geometry><cylinder radius="0.04" length="0.05"/></geometry></collision>
-    <xacro:box_inertia m="0.2" x="0.08" y="0.08" z="0.05"/>
+    <visual><origin xyz="0 0 -0.055"/><geometry><cylinder radius="0.008" length="0.06"/></geometry><material name="metal"/></visual>
+    <visual><geometry><cylinder radius="0.035" length="0.045"/></geometry><material name="plate"/></visual>
+    <visual><origin xyz="0 0 0.024"/><geometry><cylinder radius="0.03" length="0.004"/></geometry><material name="servo"/></visual>
+    <collision><geometry><cylinder radius="0.035" length="0.045"/></geometry></collision>
+    <xacro:box_inertia m="0.2" x="0.07" y="0.07" z="0.045"><origin xyz="0 0 0"/></xacro:box_inertia>
   </link>
   <joint name="lidar_joint" type="fixed">
     <parent link="base_link"/><child link="lidar_link"/>
-    <origin xyz="0.10 0 ${body_h/2 + 0.035}"/>
+    <origin xyz="0.02 0 ${plate_gap/2 + 0.095}"/>
   </joint>
 
+  <!-- Sensor head: camera between two "ultrasonic eyes", like the kit. -->
   <link name="camera_link">
-    <visual><geometry><box size="0.03 0.09 0.035"/></geometry><material name="dark"/></visual>
-    <xacro:box_inertia m="0.05" x="0.03" y="0.09" z="0.035"/>
+    <visual><origin xyz="0 0.03 0" rpy="0 ${pi/2} 0"/><geometry><cylinder radius="0.017" length="0.016"/></geometry><material name="metal"/></visual>
+    <visual><origin xyz="0.004 0.03 0" rpy="0 ${pi/2} 0"/><geometry><cylinder radius="0.013" length="0.012"/></geometry><material name="eye"/></visual>
+    <visual><origin xyz="0 -0.03 0" rpy="0 ${pi/2} 0"/><geometry><cylinder radius="0.017" length="0.016"/></geometry><material name="metal"/></visual>
+    <visual><origin xyz="0.004 -0.03 0" rpy="0 ${pi/2} 0"/><geometry><cylinder radius="0.013" length="0.012"/></geometry><material name="eye"/></visual>
+    <visual><geometry><box size="0.012 0.022 0.022"/></geometry><material name="metal"/></visual>
+    <xacro:box_inertia m="0.05" x="0.02" y="0.08" z="0.03"><origin xyz="0 0 0"/></xacro:box_inertia>
   </link>
   <joint name="camera_joint" type="fixed">
     <parent link="base_link"/><child link="camera_link"/>
-    <origin xyz="${body_l/2 + 0.01} 0 0.02"/>
+    <origin xyz="${body_l/2 + 0.025} 0 0.05"/>
   </joint>
   <!-- ROS optical convention: z forward, x right, y down. -->
   <link name="camera_optical_frame"/>
@@ -147,7 +204,7 @@
           <vertical><samples>16</samples><resolution>1</resolution>
             <min_angle>${radians(-25)}</min_angle><max_angle>${radians(15)}</max_angle></vertical>
         </scan>
-        <range><min>0.25</min><max>15.0</max><resolution>0.01</resolution></range>
+        <range><min>0.40</min><max>15.0</max><resolution>0.01</resolution></range>
         <noise><type>gaussian</type><mean>0.0</mean><stddev>0.01</stddev></noise>
       </lidar>
     </sensor>
@@ -168,6 +225,23 @@
     </sensor>
   </gazebo>
 
+  <!-- Thermal camera next to the RGB one (same optical frame). Pixels are temperatures
+       in kelvin x 100 (16 bit): skin ~309 K, debris warmed by a buried body ~303 K,
+       ambient 293 K, smouldering debris 330+ K. -->
+  <gazebo reference="camera_link">
+    <sensor name="thermal" type="thermal">
+      <topic>/${ns}/thermal/image_raw</topic>
+      <ignition_frame_id>${ns}/camera_optical_frame</ignition_frame_id>
+      <update_rate>5</update_rate>
+      <always_on>true</always_on>
+      <camera>
+        <horizontal_fov>1.2</horizontal_fov>
+        <image><width>320</width><height>240</height><format>L16</format></image>
+        <clip><near>0.1</near><far>20</far></clip>
+      </camera>
+    </sensor>
+  </gazebo>
+
   <gazebo reference="imu_link">
     <sensor name="imu" type="imu">
       <topic>/${ns}/imu</topic>
@@ -180,28 +254,40 @@
 
   <!-- ===== locomotion and state ===== -->
   <gazebo>
-    <plugin filename="RescueHexGait" name="rescue_hexabot::HexGait">
+    <plugin filename="RescueHexWalk" name="rescue_hexabot::HexWalk">
       <topic>/${ns}/cmd_vel</topic>
-      <leg><joint>lf_hip</joint><side>left</side><offset>0.0</offset></leg>
-      <leg><joint>lm_hip</joint><side>left</side><offset>0.5</offset></leg>
-      <leg><joint>lr_hip</joint><side>left</side><offset>0.0</offset></leg>
-      <leg><joint>rf_hip</joint><side>right</side><offset>0.5</offset></leg>
-      <leg><joint>rm_hip</joint><side>right</side><offset>0.0</offset></leg>
-      <leg><joint>rr_hip</joint><side>right</side><offset>0.5</offset></leg>
-      <!-- Body speed in stance = rolling radius * leg rate, so one cycle covers this: -->
-      <stride>${(leg_r + leg_t) * radians(stance_deg) / duty}</stride>
-      <track_width>0.52</track_width>  <!-- effective, calibrated for leg slip when turning -->
-      <stance_sweep>${radians(stance_deg)}</stance_sweep>
-      <duty>${duty}</duty>
-      <max_frequency>2.2</max_frequency>
-      <frequency_accel>6.0</frequency_accel>
-      <kp>20</kp>
-      <max_joint_velocity>26</max_joint_velocity>
+      <!-- tripod A: lf, rm, lr   tripod B: rf, lm, rr -->
+      <leg><name>lf</name><mount_x>${mount_fx}</mount_x><mount_y>${mount_fy}</mount_y><mount_yaw>${pi/4}</mount_yaw><group>0</group></leg>
+      <leg><name>lm</name><mount_x>0</mount_x><mount_y>${mount_my}</mount_y><mount_yaw>${pi/2}</mount_yaw><group>1</group></leg>
+      <leg><name>lr</name><mount_x>${-mount_fx}</mount_x><mount_y>${mount_fy}</mount_y><mount_yaw>${3*pi/4}</mount_yaw><group>0</group></leg>
+      <leg><name>rf</name><mount_x>${mount_fx}</mount_x><mount_y>${-mount_fy}</mount_y><mount_yaw>${-pi/4}</mount_yaw><group>1</group></leg>
+      <leg><name>rm</name><mount_x>0</mount_x><mount_y>${-mount_my}</mount_y><mount_yaw>${-pi/2}</mount_yaw><group>0</group></leg>
+      <leg><name>rr</name><mount_x>${-mount_fx}</mount_x><mount_y>${-mount_fy}</mount_y><mount_yaw>${-3*pi/4}</mount_yaw><group>1</group></leg>
+      <coxa_length>${coxa_l}</coxa_length>
+      <femur_length>${femur_l}</femur_length>
+      <tibia_length>${tibia_l}</tibia_length>
+      <stand_height>${stand_height}</stand_height>
+      <stand_reach>${stand_reach}</stand_reach>
+      <step_height>0.11</step_height>
+      <max_stride>0.12</max_stride>
+      <duty>0.55</duty>
+      <min_frequency>1.0</min_frequency>
+      <max_frequency>3.0</max_frequency>
+      <max_speed>0.45</max_speed>
+      <max_yaw_rate>1.2</max_yaw_rate>
+      <accel>1.0</accel>
+      <yaw_accel>3.0</yaw_accel>
+      <kp>30</kp>
+      <max_joint_velocity>12</max_joint_velocity>
       <cmd_timeout>0.5</cmd_timeout>
-      <climb_tilt_start>${radians(12)}</climb_tilt_start>
-      <climb_tilt_full>${radians(30)}</climb_tilt_full>
-      <climb_min_scale>0.35</climb_min_scale>
-      <flip_guard_pitch>${radians(40)}</flip_guard_pitch>
+      <climb_tilt_start>${radians(10)}</climb_tilt_start>
+      <climb_tilt_full>${radians(25)}</climb_tilt_full>
+      <climb_min_scale>0.4</climb_min_scale>
+      <!-- joint states at 30 Hz (Gazebo's JointStatePublisher sends 250 Hz and floods /tf) -->
+      <joint_state_topic>/${ns}/joint_states</joint_state_topic>
+      <joint_state_rate>30</joint_state_rate>
+      <level_gain>4.0</level_gain>
+      <level_limit>0.06</level_limit>
     </plugin>
     <!-- Ground-truth pose; hexabot_odom turns it into drifting legged odometry. -->
     <plugin filename="ignition-gazebo-odometry-publisher-system"
@@ -212,10 +298,6 @@
       <odom_topic>/${ns}/ground_truth/odom</odom_topic>
       <tf_topic>/${ns}/ground_truth/tf</tf_topic>
       <odom_publish_frequency>50</odom_publish_frequency>
-    </plugin>
-    <plugin filename="ignition-gazebo-joint-state-publisher-system"
-            name="ignition::gazebo::systems::JointStatePublisher">
-      <topic>/${ns}/joint_states</topic>
     </plugin>
   </gazebo>
 </robot>
