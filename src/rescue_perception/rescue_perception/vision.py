@@ -50,6 +50,23 @@ def touches_border(box, shape, margin=2):
     return x0 <= margin or y0 <= margin or x1 >= shape[1] - margin or y1 >= shape[0] - margin
 
 
+def box_covers(K: np.ndarray, R_cam: np.ndarray, p_cam: np.ndarray, point, box, radius: float) -> bool:
+    """Does the image box overlap a ball of `radius` around `point` (map frame)?
+
+    Used to drop "person" boxes that are really a teammate: YOLO sometimes takes a
+    distant black hexapod for a person, and a floor-plane position estimate that far
+    away is too rough to tell it apart from the teammate's position.
+    """
+    pc = R_cam.T @ (np.asarray(point, dtype=float) - p_cam)
+    if pc[2] < 0.2:                  # behind or right at the camera
+        return False
+    u = K[0, 0] * pc[0] / pc[2] + K[0, 2]
+    v = K[1, 1] * pc[1] / pc[2] + K[1, 2]
+    m = K[0, 0] * radius / pc[2]
+    x0, y0, x1, y1 = box
+    return x0 - m <= u <= x1 + m and y0 - m <= v <= y1 + m
+
+
 def floor_point(K: np.ndarray, R_cam: np.ndarray, p_cam: np.ndarray, pixel, floor_z: float):
     """Where the ray through `pixel` meets the plane z = floor_z (map frame), or None.
 

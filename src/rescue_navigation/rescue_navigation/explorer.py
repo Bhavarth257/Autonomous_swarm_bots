@@ -70,6 +70,11 @@ class Explorer(Node):
         self.blacklist_ttl = self.declare_parameter('blacklist_ttl', 90.0).value
         self.stuck_time = self.declare_parameter('stuck_time', 20.0).value
         self.time_limit = self.declare_parameter('time_limit', 1200.0).value
+        # Be back by the time limit: head home once the walk back (straight line x detour,
+        # at the average speed through rubble, plus a margin) would take what's left.
+        self.return_speed = self.declare_parameter('return_speed', 0.15).value
+        self.return_detour = self.declare_parameter('return_detour', 1.5).value
+        self.return_margin = self.declare_parameter('return_margin', 30.0).value
         self.done_checks = self.declare_parameter('empty_checks_to_finish', 10).value
         # Never call the building explored before having mapped at least this much of it.
         self.min_explored = self.declare_parameter('min_explored_m2', 10.0).value
@@ -108,6 +113,7 @@ class Explorer(Node):
         self.nav2_manager = self.create_client(ManageLifecycleNodes, 'lifecycle_manager_navigation/manage_nodes')
         self.rejections = 0
         self.nav2_restart_at = -1e9
+        self.nav2_missing_since = None   # when Nav2's action server was first found missing
         self.create_subscription(OccupancyGrid, 'nav_map', self.on_map, LATCHED)
         self.team_others = []          # world points: teammates and their goals
         self.team_grid = None          # (mask, x0, y0, res): explored by teammates
@@ -265,14 +271,19 @@ class Explorer(Node):
         self.pose = new
         return True
 
+    def time_to_home(self):
+        walk = math.hypot(self.pose[0], self.pose[1]) * self.return_detour / self.return_speed
+        return walk + self.return_margin
+
     # ---- main loop -----------------------------------------------------------
     def step(self):
         have_pose = self.update_pose()
         if self.deferred and self.nav.server_is_ready():
             self.send_goal(*self.deferred)
         if self.state in (EXPLORING, RETURNING) and have_pose:
-            if self.elapsed() > self.time_limit and self.state == EXPLORING:
-                self.go_home('time limit reached')
+            if self.state == EXPLORING and self.elapsed() + self.time_to_home() > self.time_limit:
+                self.go_home('time limit reached' if self.elapsed() > self.time_limit
+                             else 'time to head back to be out by the time limit')
             elif self.state == EXPLORING and self.grid is not None:
                 self.explore()
             self.check_stuck()
@@ -432,7 +443,14 @@ class Explorer(Node):
             if kind != 'frontier':
                 self.deferred = (x, y, kind)
             self.message = 'waiting for Nav2'
+            # A Nav2 bringup that aborted (a lifecycle service timing out at startup) never
+            # brings the action server up, so no goal is ever rejected either: restart it.
+            if self.nav2_missing_since is None:
+                self.nav2_missing_since = self.now()
+            elif self.now() - self.nav2_missing_since > 30.0:
+                self.restart_nav2()
             return
+        self.nav2_missing_since = None
         self.deferred = None
         goal = NavigateToPose.Goal()
         ps = PoseStamped()
@@ -562,7 +580,7 @@ class Explorer(Node):
         self.nav2_restart_at = self.now()
         self.rejections = 0
         self.message = 'restarting Nav2'
-        self.get_logger().warn('Nav2 rejects goals: resetting and starting its lifecycle nodes')
+        self.get_logger().warn('Nav2 is not taking goals: resetting and starting its lifecycle nodes')
 
         def startup(_future):
             self.nav2_manager.call_async(ManageLifecycleNodes.Request(command=ManageLifecycleNodes.Request.STARTUP))

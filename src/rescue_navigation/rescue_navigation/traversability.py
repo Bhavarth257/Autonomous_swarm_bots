@@ -30,7 +30,8 @@ The cells under the robot are marked as walked-on floor: the lidar can't see
 within ~0.6 m of the robot, but the robot is standing there. For the same reason an
 obstacle recorded there (typically a teammate squeezing past) can never be seen to go
 away; when the explorer reports being stuck, those cells are forgotten and refill as
-floor until the lidar sees them again from further off.
+floor until the lidar sees them again from further off. Cells the robot itself has
+walked through are never lethal, so the way back out always stays open.
 """
 import json
 import math
@@ -101,6 +102,10 @@ class Traversability(Node):
         # start (to reach the entrance and come back) is allowed; otherwise the planner
         # happily routes through unknown space around the outside of the building.
         self.start_zone = self.declare_parameter('start_zone_radius', 3.0).value
+        # Where this robot's body has been is walkable, whatever the map says now: keeps the
+        # way back open when stale obstacles (teammates squeezing through a doorway after
+        # us) would otherwise close it.
+        self.trail_radius = self.declare_parameter('trail_radius', 0.15).value
         self.nav_res = self.declare_parameter('nav_map_resolution', 0.05).value
 
         self.n = int(size / self.res)
@@ -125,6 +130,16 @@ class Traversability(Node):
 
     def on_map(self, msg):
         self.slam = msg
+
+    def mark_trail(self, x, y):
+        k = int(self.trail_radius / self.nav_res) + 1
+        ci = int((x - self.nav_origin[0]) / self.nav_res)
+        cj = int((y - self.nav_origin[1]) / self.nav_res)
+        j0, j1 = max(0, cj - k), min(self.nav_h, cj + k + 1)
+        i0, i1 = max(0, ci - k), min(self.nav_w, ci + k + 1)
+        if j0 < j1 and i0 < i1:
+            near = np.hypot(self.nav_X[j0:j1, i0:i1] - x, self.nav_Y[j0:j1, i0:i1] - y) <= self.trail_radius
+            self.trail[j0:j1, i0:i1] |= near
 
     def forget_near(self, _msg):
         if self.body is None:
@@ -175,6 +190,7 @@ class Traversability(Node):
                                      rect, map_in_world)
         near_start = np.hypot(X, Y) < self.start_zone
         self.fence = ~in_building & ~near_start
+        self.trail = np.zeros((self.nav_h, self.nav_w), dtype=bool)
 
     def report(self):
         st = self.stats
@@ -199,6 +215,7 @@ class Traversability(Node):
         world = pts @ R.T + p
         bx, by, bz = m_b[1]
         self.body = (bx, by)
+        self.mark_trail(bx, by)
         world = world[np.hypot(world[:, 0] - bx, world[:, 1] - by) > self.body_radius]
         # Collapsed roof slabs and ceilings are far above the robot: not obstacles.
         world = world[world[:, 2] < bz + self.ceiling_cut]
@@ -278,6 +295,7 @@ class Traversability(Node):
         for rx, ry in self.robot_spots():             # robots are not walls
             near = np.hypot(self.nav_X - rx, self.nav_Y - ry) < self.robot_clear
             fused[near & (fused == gu.LETHAL)] = PROBABLY_FREE
+        fused[self.trail & (fused == gu.LETHAL)] = PROBABLY_FREE
         fused[self.fence] = gu.LETHAL
         out = OccupancyGrid()
         out.header.stamp = now

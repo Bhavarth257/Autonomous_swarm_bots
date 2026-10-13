@@ -97,3 +97,14 @@ def test_far_sightings_weigh_less():
     for k in range(3):                                    # a few close views, accurate
         tr.add('rgb', 10.0, 5.0, 20 + k, robot_xy=(9.0 + k * 0.9, 4.0), distance=1.5)
     assert len(tr.tracks) == 1 and abs(tr.tracks[0].x - 10.0) < 0.3
+
+
+def test_box_covers_teammate():
+    R = np.array([[0, 0, 1.0], [-1.0, 0, 0], [0, -1.0, 0]])
+    p_cam = np.array([0.0, 0.0, 0.2])
+    K = np.array([[500, 0, 320], [0, 500, 240], [0, 0, 1.0]])
+    # A teammate 6 m ahead, 0.5 m to the left, body at 0.2 m: u = 320 + 500 * 0.5 / 6 = 278.
+    mate = (6.0, 0.5, 0.2)
+    assert vi.box_covers(K, R, p_cam, mate, (270, 230, 285, 245), 0.25)
+    assert not vi.box_covers(K, R, p_cam, mate, (400, 230, 420, 245), 0.25)
+    assert not vi.box_covers(K, R, p_cam, (-3.0, 0.0, 0.2), (0, 0, 640, 480), 0.25)   # behind

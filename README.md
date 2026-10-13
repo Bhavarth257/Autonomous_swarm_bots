@@ -33,10 +33,26 @@ Mean victim position error 0.6-0.7 m; the hot decoy was reported as a hazard, ne
 as a victim, in every run. Simulation speed with everything running: ~0.85x real time
 on a laptop with an i5-12500H and an RTX 3050 (YOLO ~15 ms per frame on the GPU).
 
+**Hard 4x4 building** (`grid:=4 difficulty:=hard`, seed 4, 24 x 20 m, smoke, dark rooms,
+0.85 m doors, stepped debris), three robots, 15 min limit, two consecutive runs:
+
+| run | victims found | false positives | mean error | floor explored | robots home |
+|---|---|---|---|---|---|
+| 1 | 6/6 (4/4 visible, 2/2 buried) | 1 | 0.38 m | 100 % | 1/3 |
+| 2 | 6/6 (4/4 visible, 2/2 buried) | 1 | 0.31 m | 100 % | 1/3 |
+
+The hot decoy was a hazard, never a victim. Robots that were still deep inside the
+building at the time limit didn't make it out; the early, distance-based return and the
+"own trail stays walkable" rule were added after these runs and still need a full
+scored run to confirm.
+
 Known limitations:
 
-- Most "false positives" are real victims placed 2-3 m off, seen only from far away
-  (the camera sits 20 cm above the floor, so a pixel of error is a lot of floor).
+- Getting all three robots back out of a large rubble-filled building in time (see above).
+- A heavily loaded or very hot laptop slows the simulation until odometry arrives too
+  late to use and a robot never starts; let it cool down between long runs.
+- Far-away sightings are still placed less accurately than close ones (the camera sits
+  20 cm above the floor, so a pixel of error is a lot of floor).
 - A victim seen only from a distance can be missed, and a buried victim with a limb
   showing may be reported as visible (and the reverse).
 - Results vary from run to run (physics, timing); a robot wedged against rubble
@@ -81,7 +97,7 @@ Useful launch arguments:
 | `victims_file` | | JSON with your own victims instead of the random ones |
 | `num_robots` | 1 | 1-3 hexapods |
 | `auto_start` | false | start exploring without pressing START |
-| `time_limit` | 1200 | seconds, then the robots walk home |
+| `time_limit` | 1200 | seconds; each robot heads home early enough (from its distance to the entrance) to be out by then |
 | `gui`, `rviz`, `dashboard` | true | Gazebo, RViz, web mission control |
 | `port`, `open_browser` | 8080, true | mission control address; open a browser tab at start |
 | `perception`, `swarm` | true | victim detector; radio + swarm agents |
@@ -246,6 +262,10 @@ hazard handling, floor coverage, mission time, robots back at the start.
   runs on the CPU. `sudo rmmod nvidia_uvm && sudo modprobe nvidia_uvm` (or a reboot)
   brings the GPU back; `python3 -c "import torch; print(torch.cuda.is_available())"`
   should print `True`.
+- **Robots never start moving, and the log repeats `no rN/map -> rN/odom transform yet` or
+  `Message Filter dropping message ... queue is full`**: a run that crashed or was killed
+  left stale shared-memory files behind, and ROS messages get lost. With nothing ROS
+  running, `fastdds shm clean`, then launch again.
 - **Mission control shows "address already in use"**: another run is still up, or
   something else uses 8080; pass `port:=8090`.
 - **No cameras on the page**: they appear once Gazebo renders its first frames

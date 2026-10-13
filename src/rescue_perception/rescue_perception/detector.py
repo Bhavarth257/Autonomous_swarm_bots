@@ -100,6 +100,11 @@ class RobotPipeline:
         c, s = math.cos(myaw), math.sin(myaw)
         return mx + c * x - s * y, my + s * x + c * y
 
+    def to_map(self, wx, wy):
+        mx, my, myaw = self.map_in_world
+        c, s = math.cos(myaw), math.sin(myaw)
+        return c * (wx - mx) + s * (wy - my), -s * (wx - mx) + c * (wy - my)
+
 
 class Detector(Node):
     def __init__(self):
@@ -110,6 +115,12 @@ class Detector(Node):
         self.conf = self.declare_parameter('person_confidence', 0.35).value
         self.max_range = self.declare_parameter('max_range', 8.0).value
         self.floor_only_range = self.declare_parameter('floor_only_range', 5.0).value
+        # Victims lie on the building floor (map z = 0), not on whatever the robot is standing
+        # on: with the camera ~0.3 m up, a robot on a 12 cm step would place a victim 4 m
+        # away at 2.4 m if it used its own ground as the floor plane.
+        self.floor_height = self.declare_parameter('floor_height', 0.0).value
+        # Measured: tracks sat 0.4-0.7 m short of the body's middle, along the line of sight.
+        self.body_depth = self.declare_parameter('body_depth', 0.3).value
         # Victims are inside the building; a teammate hexapod is not a person.
         self.building = list(self.declare_parameter('building_rect', [-1e9, -1e9, 1e9, 1e9]).value)
         self.robot_gap = self.declare_parameter('robot_exclusion', 0.7).value
@@ -169,17 +180,23 @@ class Detector(Node):
             cues += vi.thermal_cues(th)
 
         robot_xy = m_fp[1][:2]
-        floor_z = float(m_fp[1][2])
+        floor_z = self.floor_height
         self.robot_world[r.ns] = r.to_world(float(robot_xy[0]), float(robot_xy[1]))
         for c in cues:
             K = r.K_rgb if c.source == 'rgb' else r.K_th
             shape = rgb.shape if c.source == 'rgb' else th.shape
             if vi.touches_border(c.box, shape):
                 continue          # partly out of view: its bottom edge isn't where it stands
+            if c.source == 'rgb' and any(
+                    vi.box_covers(K, m_cam[0], m_cam[1], (*r.to_map(px, py), floor_z + 0.2), c.box, 0.3)
+                    for ns, (px, py) in self.robot_world.items() if ns != r.ns):
+                continue          # a teammate: YOLO sometimes takes the black hexapod for a person
             # Distance from the box's bottom edge meeting the floor; lidar refines it when
             # it agrees, but a lying body is often below the lidar rings.
             x0, y0, x1, y1 = c.box
-            on_floor = vi.floor_point(K, m_cam[0], m_cam[1], ((x0 + x1) / 2, y1), floor_z + 0.05)
+            # The box bottom is where feet or body touch the floor: intersect with the floor
+            # itself (a plane even 5 cm up shortens a 5 m estimate by ~1 m at this camera height).
+            on_floor = vi.floor_point(K, m_cam[0], m_cam[1], ((x0 + x1) / 2, y1), floor_z)
             expected = None
             if on_floor is not None:
                 expected = float((m_cam[0].T @ (on_floor - m_cam[1]))[2])
@@ -194,6 +211,10 @@ class Detector(Node):
                 continue
             if not (-0.5 < pm[2] - floor_z < 1.5):          # victims are on the floor
                 continue
+            # Camera and lidar see the near side of a body; its middle is further away.
+            ray = pm[:2] - robot_xy
+            pm = pm.copy()
+            pm[:2] += self.body_depth * ray / max(float(np.linalg.norm(ray)), 1e-6)
             wx, wy = r.to_world(float(pm[0]), float(pm[1]))
             x0, y0, x1, y1 = self.building
             if not (x0 - 0.2 < wx < x1 + 0.2 and y0 - 0.2 < wy < y1 + 0.2):
