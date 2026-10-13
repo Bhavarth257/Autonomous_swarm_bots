@@ -15,6 +15,17 @@
 // physics engine does the actual walking and the joints have the compliance of a
 // torque-limited servo.
 //
+// Terrain adaptation, so climbing is smooth instead of jerky:
+//   - touch-down sensing: the actual foot position (forward kinematics of the measured
+//     joint angles) is compared with the target while a foot comes down; if it stops
+//     above the target, it has landed on something, and that leg holds that height
+//     through its stance instead of pushing the body up;
+//   - the body height follows the mean height of the feet on the ground, so the robot
+//     rises onto a block smoothly and comes back down after it;
+//   - look-ahead (optional <terrain_topic>, ignition.msgs.Float: tallest step ahead in
+//     metres, from the traversability map): before reaching debris, feet lift higher,
+//     the body rises a little and the gait slows, all with rate limits.
+//
 // When idle, the robot finishes the steps in progress and stands on all six feet.
 // The IMU levels the body: legs on the high side shorten and legs on the low side
 // extend (integral action on roll/pitch), so feet resting on debris or a ramp don't
@@ -36,6 +47,9 @@
 //     (250 Hz) and floods /tf through robot_state_publisher.
 //   <level_gain/>     body levelling integral gain [1/s]
 //   <level_limit/>    max leg length change from levelling [m]
+//   <terrain_topic/>  look-ahead step height input (optional)
+//   <max_step_height/> highest foot lift in climbing mode [m]
+//   <climb_slowdown/> speed fraction kept at the tallest step ahead
 
 #include <algorithm>
 #include <array>
@@ -50,6 +64,7 @@
 #include <ignition/gazebo/Util.hh>
 #include <ignition/gazebo/components/JointPosition.hh>
 #include <ignition/gazebo/components/JointVelocityCmd.hh>
+#include <ignition/msgs/float.pb.h>
 #include <ignition/msgs/model.pb.h>
 #include <ignition/msgs/twist.pb.h>
 #include <ignition/plugin/Register.hh>
@@ -114,6 +129,8 @@ public:
     minScale_ = get("climb_min_scale", 0.4);
     levelGain_ = get("level_gain", 4.0);
     levelLimit_ = get("level_limit", 0.06);
+    maxStepHeight_ = get("max_step_height", 0.15);
+    climbSlow_ = get("climb_slowdown", 0.55);
 
     for (auto e = sdf->GetElement("leg"); e; e = e->GetNextElement("leg")) {
       Leg leg;
@@ -150,6 +167,9 @@ public:
 
     const auto topic = sdf->Get<std::string>("topic");
     node_.Subscribe(topic, &HexWalk::OnTwist, this);
+    if (sdf->HasElement("terrain_topic")) {
+      node_.Subscribe(sdf->Get<std::string>("terrain_topic"), &HexWalk::OnTerrain, this);
+    }
     if (sdf->HasElement("joint_state_topic")) {
       jsPub_ = node_.Advertise<msgs::Model>(sdf->Get<std::string>("joint_state_topic"));
       jsPeriod_ = 1.0 / get("joint_state_rate", 30.0);
@@ -168,9 +188,16 @@ public:
       return;
     }
 
-    double cvx = 0.0, cvy = 0.0, cwz = 0.0;
+    double cvx = 0.0, cvy = 0.0, cwz = 0.0, ahead = 0.0;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (now - terrainTime_ < 1.0) {
+        ahead = std::clamp(terrainAhead_, 0.0, 0.2);
+      }
+      if (newTerrain_) {
+        terrainTime_ = now;
+        newTerrain_ = false;
+      }
       if (newCmd_) {
         lastCmdTime_ = now;
         newCmd_ = false;
@@ -197,8 +224,13 @@ public:
     const double leftUp = pose.Rot().RotateVector({0, 1, 0}).Z();
     levelX_ = std::clamp(levelX_ + levelGain_ * noseUp * dt, -0.6, 0.6);
     levelY_ = std::clamp(levelY_ + levelGain_ * leftUp * dt, -0.6, 0.6);
-    const double climb = std::clamp((tilt - tiltStart_) / (tiltFull_ - tiltStart_), 0.0, 1.0);
-    const double scale = 1.0 - climb * (1.0 - minScale_);
+    // Tilt bobs with every step: filter it (0.4 s) so the speed doesn't oscillate.
+    tiltF_ += (tilt - tiltF_) * std::min(1.0, dt / 0.4);
+    const double climb = std::clamp((tiltF_ - tiltStart_) / (tiltFull_ - tiltStart_), 0.0, 1.0);
+    // Look-ahead: ease into climbing mode before the debris, out of it after.
+    climbMode_ = ramp(climbMode_, std::clamp(ahead / 0.12, 0.0, 1.0), 1.5 * dt);
+    const double scale = (1.0 - climb * (1.0 - minScale_)) * (1.0 - climbMode_ * (1.0 - climbSlow_));
+    const double stepH = stepHeight_ + climbMode_ * (maxStepHeight_ - stepHeight_);
     vx_ = ramp(vx_, cvx * scale, accel_ * dt);
     vy_ = ramp(vy_, cvy * scale, accel_ * dt);
     wz_ = ramp(wz_, cwz * scale, yawAccel_ * dt);
@@ -208,8 +240,25 @@ public:
     for (const auto & leg : legs_) {
       maxFootSpeed = std::max(maxFootSpeed, std::hypot(vx_ - wz_ * leg.ny, vy_ + wz_ * leg.nx));
     }
-    const bool moving = maxFootSpeed > 0.005;
+    const bool commanded = maxFootSpeed > 0.005;
+    if (commanded) {
+      lastMoving_ = now;
+    }
+    // Keep stepping through brief dips in the command (no stop-start stammer).
+    const bool moving = commanded || now - lastMoving_ < 0.6;
     double freq = std::clamp(maxFootSpeed * duty_ / maxStride_, minFreq_, maxFreq_);
+
+    // Body height follows the mean height of the feet on the ground (rate limited).
+    double sumT = 0.0;
+    int nT = 0;
+    for (const auto & leg : legs_) {
+      if (!leg.swinging) {
+        sumT += leg.terrain;
+        ++nT;
+      }
+    }
+    const double liftTarget = std::clamp((nT ? sumT / nT : 0.0) + 0.3 * climbMode_ * ahead, -0.05, 0.10);
+    bodyLift_ = ramp(bodyLift_, liftTarget, 0.12 * dt);
 
     if (moving) {
       standing_ = false;
@@ -224,16 +273,34 @@ public:
       phase_ = wrap01(phase_ + freq * dt);
     }
 
+    // Where the floor really is (body frame): the measured height of the feet on the
+    // ground, minus what each stands on. Using the nominal height instead would turn
+    // body sag under load into fake "terrain" and feed back on itself.
+    double floorSum = 0.0;
+    int floorN = 0;
+    for (const auto & leg : legs_) {
+      if (!leg.swinging && leg.init) {
+        floorSum += FootZ(leg, ecm) - leg.terrain;
+        ++floorN;
+      }
+    }
+    const double floorZ = floorN ? floorSum / floorN : -height_ - bodyLift_;
+
     settled_ = true;
     for (auto & leg : legs_) {
       const double ux = vx_ - wz_ * leg.ny;   // body velocity at the foot, body frame
       const double uy = vy_ + wz_ * leg.nx;
       const double p = wrap01(phase_ + 0.5 * leg.group);
       // Legs on the high side get shorter (foot closer to the body), low side longer.
-      double fz = -height_ + std::clamp(levelX_ * leg.nx + levelY_ * leg.ny, -levelLimit_, levelLimit_);
+      const double level = std::clamp(levelX_ * leg.nx + levelY_ * leg.ny, -levelLimit_, levelLimit_);
+      const double ground = -height_ - bodyLift_ + level;      // where flat floor would be
+      double fz = ground + leg.terrain;
       if (standing_ || p < duty_) {
         if (leg.swinging) {
           leg.swinging = false;
+          if (!leg.touched) {
+            leg.terrain = 0.0;          // came all the way down: floor level
+          }
         }
         if (!standing_) {
           leg.fx -= ux * dt;
@@ -242,8 +309,10 @@ public:
       } else {
         if (!leg.swinging) {
           leg.swinging = true;
+          leg.touched = false;
           leg.lx = leg.fx;
           leg.ly = leg.fy;
+          leg.liftZ = leg.terrain;      // lift off from the height it stood on
         }
         const double s = (p - duty_) / (1.0 - duty_);
         const double half = 0.5 * duty_ / freq;   // half the next stance stroke, in time
@@ -253,7 +322,26 @@ public:
         const double move = smooth((s - 0.2) / 0.6);
         leg.fx = leg.lx + (tx - leg.lx) * move;
         leg.fy = leg.ly + (ty - leg.ly) * move;
-        fz += stepHeight_ * (s < 0.5 ? smooth(s / 0.25) : smooth((1.0 - s) / 0.25));
+        // Arc from the lift-off height up to ground + step height and down to the floor;
+        // stop descending as soon as the foot touches something.
+        const double top = std::max(leg.liftZ, 0.0) + stepH;
+        double rel = s < 0.5 ? leg.liftZ + (top - leg.liftZ) * smooth(s / 0.25) : top * smooth((1.0 - s) / 0.25);
+        const double footZ = leg.init ? FootZ(leg, ecm) : ground;
+        if (leg.touched) {
+          rel = leg.terrain;
+        } else if (s > 0.7 && leg.init) {
+          // Landed on something: the foot has stopped going down while still clearly
+          // above the floor the other feet stand on, and above where it was told to be.
+          const double above = footZ - floorZ;
+          const bool stopped = (footZ - leg.prevFootZ) / dt > -0.05;
+          if (stopped && above > 0.03 && footZ > ground + rel + 0.015) {
+            leg.touched = true;
+            leg.terrain = std::min(above, 0.16);
+            rel = leg.terrain;
+          }
+        }
+        leg.prevFootZ = footZ;
+        fz = ground + rel;
         if (std::hypot(leg.fx - leg.nx, leg.fy - leg.ny) > 0.02) {
           settled_ = false;
         }
@@ -300,6 +388,10 @@ private:
     double lx{0}, ly{0};          // lift-off position of the current swing
     bool swinging{false};
     bool init{false};
+    bool touched{false};          // landed early during this swing
+    double terrain{0.0};          // height of what this foot stands on, above flat floor
+    double liftZ{0.0};
+    double prevFootZ{0.0};
     std::array<double, 3> q{0, 0, 0};
   };
 
@@ -322,6 +414,25 @@ private:
       }
     }
     jsPub_.Publish(msg);
+  }
+
+  // Measured foot height in the body frame (forward kinematics of the joint angles).
+  double FootZ(const Leg & leg, const EntityComponentManager & ecm) const
+  {
+    const auto * f = ecm.Component<components::JointPosition>(leg.joint[1]);
+    const auto * t = ecm.Component<components::JointPosition>(leg.joint[2]);
+    if (!f || !t || f->Data().empty() || t->Data().empty()) {
+      return -height_;
+    }
+    const double a = f->Data()[0], b = t->Data()[0];
+    return l2_ * std::sin(a) + l3_ * std::sin(a + b);
+  }
+
+  void OnTerrain(const msgs::Float & msg)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    terrainAhead_ = msg.data();
+    newTerrain_ = true;
   }
 
   // Foot (body frame) -> coxa, femur, tibia angles. Femur/tibia angles are positive
@@ -364,6 +475,10 @@ private:
   double minFreq_, maxFreq_, maxSpeed_, maxYawRate_, accel_, yawAccel_;
   double kp_, maxJointVel_, timeout_, tiltStart_, tiltFull_, minScale_, levelGain_, levelLimit_;
   double levelX_{0}, levelY_{0};
+  double maxStepHeight_, climbSlow_;
+  double terrainAhead_{0.0}, terrainTime_{-1e9};
+  bool newTerrain_{false};
+  double tiltF_{0.0}, climbMode_{0.0}, bodyLift_{0.0}, lastMoving_{-1e9};
   double vx_{0}, vy_{0}, wz_{0}, phase_{0.5};
   bool standing_{true};
   bool settled_{true};

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rescue Mission Control</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⬢</text></svg>">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">⬢</div>
+    <div>
+      <div class="title">Rescue Mission Control</div>
+      <div class="subtitle" id="subtitle">connecting…</div>
+    </div>
+  </div>
+  <div class="kpis">
+    <div class="kpi"><span id="kpi-time">00:00</span><label>mission time</label></div>
+    <div class="kpi"><span id="kpi-cov">0 %</span><label>building explored</label></div>
+    <div class="kpi"><span id="kpi-vic">0</span><label>victims found</label></div>
+    <div class="kpi"><span id="kpi-act">0/0</span><label>robots active</label></div>
+  </div>
+  <div class="actions">
+    <button class="btn go" data-cmd="start">▶ Start all</button>
+    <button class="btn stop" data-cmd="stop">■ Stop all</button>
+    <button class="btn home" data-cmd="return_home">⌂ Return all</button>
+    <button class="btn ghost" id="btn-report">Save report</button>
+    <button class="btn ghost" id="btn-scenario">Save scenario</button>
+    <span class="conn" id="conn" title="link to the robots">●</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="panel map-panel">
+    <div class="map-toolbar">
+      <div class="group" id="modes">
+        <button class="tool active" data-mode="select" title="Select robots and victims">Select</button>
+        <button class="tool" data-mode="goto" title="Send the selected robot to a point">Send robot here</button>
+        <button class="tool" data-mode="place" title="Place a victim in the running simulation">Place victim</button>
+        <select id="place-kind" title="Victim to place">
+          <option value="lying">lying</option>
+          <option value="sitting">sitting</option>
+          <option value="buried">buried (under debris)</option>
+        </select>
+      </div>
+      <div class="group" id="layers">
+        <label><input type="checkbox" data-layer="map" checked>map</label>
+        <label><input type="checkbox" data-layer="trails" checked>trails</label>
+        <label><input type="checkbox" data-layer="radio">radio range</label>
+        <label><input type="checkbox" data-layer="goals" checked>goals</label>
+        <label><input type="checkbox" data-layer="victims" checked>victims</label>
+      </div>
+      <div class="group">
+        <button class="tool" id="zoom-in">＋</button>
+        <button class="tool" id="zoom-out">－</button>
+        <button class="tool" id="zoom-fit">Fit</button>
+      </div>
+    </div>
+    <canvas id="map"></canvas>
+    <div class="hint" id="hint">Drag to pan · scroll to zoom · click a robot or victim</div>
+    <div class="legend">
+      <span><i style="background:#344050"></i>floor</span>
+      <span><i style="background:#78623c"></i>climbable</span>
+      <span><i style="background:#cdd2da"></i>blocked</span>
+      <span><i class="dot" style="background:#ff4d4f"></i>visible victim</span>
+      <span><i class="dot" style="background:#ff9f1a"></i>buried victim</span>
+      <span><i class="dot" style="background:#3d8bff"></i>hazard</span>
+      <span><i class="hatch smoke"></i>smoke</span>
+      <span><i class="hatch dark"></i>dark</span>
+    </div>
+    <div class="popup hidden" id="popup"></div>
+  </section>
+
+  <aside class="side">
+    <div class="panel">
+      <div class="panel-title">Robots <span class="muted" id="sel-label"></span></div>
+      <div class="robots" id="robots"></div>
+    </div>
+    <div class="panel teleop hidden" id="teleop">
+      <div class="panel-title">Manual control · <span id="teleop-robot"></span></div>
+      <div class="teleop-body">
+        <canvas id="joystick" width="150" height="150"></canvas>
+        <div class="teleop-help">
+          <div><kbd>W</kbd><kbd>S</kbd> forward / back</div>
+          <div><kbd>A</kbd><kbd>D</kbd> turn</div>
+          <div><kbd>Q</kbd><kbd>E</kbd> crab walk</div>
+          <label>speed <input type="range" id="teleop-speed" min="0.1" max="0.45" step="0.05" value="0.3">
+            <span id="teleop-speed-val">0.30</span> m/s</label>
+          <button class="btn go small" id="btn-resume">Resume autonomy</button>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">Cameras <span class="muted">click to enlarge</span></div>
+      <div class="cams" id="cams"></div>
+    </div>
+    <div class="panel grow">
+      <div class="panel-title">Victims</div>
+      <div class="victims" id="victims"></div>
+    </div>
+  </aside>
+
+  <section class="bottom">
+    <div class="panel chart-panel">
+      <div class="panel-title">Coverage &amp; victims</div>
+      <canvas id="chart-cov"></canvas>
+    </div>
+    <div class="panel chart-panel">
+      <div class="panel-title">Distance walked</div>
+      <canvas id="chart-dist"></canvas>
+    </div>
+    <div class="panel timeline-panel">
+      <div class="panel-title">Timeline</div>
+      <div class="timeline" id="timeline"></div>
+    </div>
+  </section>
+</main>
+
+<div class="modal hidden" id="modal"><div class="modal-body"><img id="modal-img" alt=""><div id="modal-cap"></div></div></div>
+<div class="toast hidden" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

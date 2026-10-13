@@ -6,6 +6,8 @@ fuses it with the SLAM occupancy grid into the map Nav2 and the explorer use:
 
   in   lidar/points    3D lidar cloud
        map             SLAM occupancy grid (walls / tall obstacles from the 2D scan)
+       traversability/forget_near  std_msgs/Empty: the explorer is stuck here; forget
+                       what the height map holds within the robot's blind radius
   out  nav_map         fused OccupancyGrid (5 cm) over a fixed area: the building
                        outline plus the robot's start, with a margin. Fixed rather
                        than following SLAM's map, which only grows where the scan
@@ -15,15 +17,22 @@ fuses it with the SLAM occupancy grid into the map Nav2 and the explorer use:
                        lethal (geofence). Inside, cells are:
                          lethal          where SLAM or the height map says so
                          height cost     where the lidar has seen the floor
-                         5, probably free  where SLAM's scan (0.25-1.5 m above the
+                         5, probably free  where SLAM's scan (0.4-1.5 m above the
                                          floor) saw open space but no lidar ring has
                                          touched the floor yet
                          unknown         everywhere else
        traversability  the 10 cm cost grid itself, for debugging
+       terrain_ahead   std_msgs/Float32: tallest climbable step 0.25-0.9 m in front of the
+                       robot, relative to the floor it stands on; the gait plugin uses it
+                       to lift its feet higher and slow down before reaching debris
 
 The cells under the robot are marked as walked-on floor: the lidar can't see
-within ~0.6 m of the robot, but the robot is standing there.
+within ~0.6 m of the robot, but the robot is standing there. For the same reason an
+obstacle recorded there (typically a teammate squeezing past) can never be seen to go
+away; when the explorer reports being stuck, those cells are forgotten and refill as
+floor until the lidar sees them again from further off.
 """
+import json
 import math
 from array import array
 
@@ -33,6 +42,7 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import Empty, Float32, String
 
 from rescue_navigation import grid_utils as gu
 from rescue_navigation.body_pose import BodyPose, FrameWatch, stamp_seconds
@@ -73,9 +83,19 @@ class Traversability(Node):
         # Points this close (horizontally) to the robot's centre are its own legs: a
         # foot swinging forward reaches the lidar's lowest ring at ~0.4 m.
         self.body_radius = self.declare_parameter('body_radius', 0.55).value
+        self.ceiling_cut = self.declare_parameter('ceiling_cut', 1.2).value
+        # Robots are not part of the building: the team's start positions and teammates'
+        # current positions never become map obstacles (live robots are still seen by Nav2's
+        # obstacle layer). Without this a robot that started between two others stays boxed
+        # in by their ghosts: it isn't moving, so it never re-scans the floor they stood on.
+        sp = list(self.declare_parameter('robot_starts', [0.0, 0.0]).value)
+        self.robot_starts = [(sp[k], sp[k + 1]) for k in range(0, len(sp) - 1, 2)]
+        self.robot_clear = self.declare_parameter('robot_clearance', 0.6).value
+        self.teammates = []           # world (x, y) from the swarm agent
         rate = self.declare_parameter('publish_rate', 1.0).value
         rect = list(self.declare_parameter('building_rect', [0.0, 0.0, 18.0, 15.0]).value)
         map_in_world = list(self.declare_parameter('map_in_world', [0.0, 0.0, 0.0]).value)
+        self.map_in_world = map_in_world
         margin = self.declare_parameter('nav_map_margin', 3.0).value
         # Geofence: the mission area is the building. Outside it only the area around the
         # start (to reach the entrance and come back) is allowed; otherwise the planner
@@ -92,15 +112,45 @@ class Traversability(Node):
 
         self.pub_nav = self.create_publisher(OccupancyGrid, 'nav_map', LATCHED)
         self.pub_trav = self.create_publisher(OccupancyGrid, 'traversability', LATCHED)
+        self.pub_ahead = self.create_publisher(Float32, 'terrain_ahead', 10)
         self.frames = FrameWatch(self, [(self.map_frame, f'{prefix}odom')])
         self.pose = BodyPose(self, self.frames, prefix, self.body_height)
         self.create_subscription(PointCloud2, 'lidar/points', self.on_cloud, qos_profile_sensor_data)
         self.create_subscription(OccupancyGrid, 'map', self.on_map, LATCHED)
+        self.create_subscription(String, 'team/state', self.on_team, LATCHED)
+        self.create_subscription(Empty, 'traversability/forget_near', self.forget_near, 10)
+        self.body = None              # last body position (map frame), from the lidar's pose
         self.create_timer(1.0 / rate, self.publish)
         self.create_timer(10.0, self.report)
 
     def on_map(self, msg):
         self.slam = msg
+
+    def forget_near(self, _msg):
+        if self.body is None:
+            return
+        bx, by = self.body
+        k = int(self.blind_radius / self.res) + 1
+        ci, cj = int((bx - self.origin[0]) / self.res), int((by - self.origin[1]) / self.res)
+        j0, j1, i0, i1 = max(0, cj - k), min(self.n, cj + k + 1), max(0, ci - k), min(self.n, ci + k + 1)
+        if j0 >= j1 or i0 >= i1:
+            return
+        jj, ii = np.ogrid[j0:j1, i0:i1]
+        sub = self.height[j0:j1, i0:i1]
+        sub[((ii - ci) ** 2 + (jj - cj) ** 2) * self.res ** 2 <= self.blind_radius ** 2] = np.nan
+        self.get_logger().info(f'stuck: forgot the height map within {self.blind_radius} m')
+
+    def on_team(self, msg):
+        st = json.loads(msg.data)
+        self.teammates = [tuple(v['pose'][:2]) for r, v in st.get('team', {}).items()
+                          if r != st.get('robot') and v.get('pose')]
+
+    def robot_spots(self):
+        """Start positions and teammates, in this robot's map frame."""
+        mx, my, myaw = self.map_in_world
+        c, s = math.cos(-myaw), math.sin(-myaw)
+        return [(c * (x - mx) - s * (y - my), s * (x - mx) + c * (y - my))
+                for x, y in self.robot_starts + self.teammates]
 
     def _init_nav_geometry(self, rect, map_in_world, margin):
         mx, my, myaw = map_in_world
@@ -148,7 +198,12 @@ class Traversability(Node):
         R, p = m_c
         world = pts @ R.T + p
         bx, by, bz = m_b[1]
+        self.body = (bx, by)
         world = world[np.hypot(world[:, 0] - bx, world[:, 1] - by) > self.body_radius]
+        # Collapsed roof slabs and ceilings are far above the robot: not obstacles.
+        world = world[world[:, 2] < bz + self.ceiling_cut]
+        for rx, ry in self.robot_spots():
+            world = world[np.hypot(world[:, 0] - rx, world[:, 1] - ry) > self.robot_clear]
         i = ((world[:, 0] - self.origin[0]) / self.res).astype(np.int64)
         j = ((world[:, 1] - self.origin[1]) / self.res).astype(np.int64)
         ok = (i >= 0) & (i < self.n) & (j >= 0) & (j < self.n)
@@ -163,6 +218,7 @@ class Traversability(Node):
         self.height[hit] = scan[hit]
 
         # The robot stands on the floor it occupies.
+        self.publish_ahead(m_b)
         k = int(self.blind_radius / self.res)
         ci = int((bx - self.origin[0]) / self.res)
         cj = int((by - self.origin[1]) / self.res)
@@ -175,6 +231,19 @@ class Traversability(Node):
             sub[(d2 <= self.blind_radius ** 2) & np.isnan(sub)] = bz
             # Within the body: anything tall is this robot's own legs.
             sub[(d2 <= self.self_radius ** 2) & (sub > bz + self.step_max)] = bz
+
+    def publish_ahead(self, m_b):
+        """Tallest step up in a corridor ahead (body frame x 0.25-0.9 m, |y| < 0.3 m)."""
+        R, p = m_b
+        xs, ys = np.meshgrid(np.arange(0.25, 0.9, self.res), np.arange(-0.3, 0.31, self.res))
+        wx = p[0] + R[0, 0] * xs + R[0, 1] * ys
+        wy = p[1] + R[1, 0] * xs + R[1, 1] * ys
+        i = ((wx - self.origin[0]) / self.res).astype(np.int64)
+        j = ((wy - self.origin[1]) / self.res).astype(np.int64)
+        ok = (i >= 0) & (i < self.n) & (j >= 0) & (j < self.n)
+        h = self.height[j[ok], i[ok]] - p[2]
+        h = h[np.isfinite(h) & (h < self.step_max + 0.05)]       # climbable steps only
+        self.pub_ahead.publish(Float32(data=float(max(0.0, h.max())) if len(h) else 0.0))
 
     def publish(self):
         trav = gu.traversability(self.height, self.step_max, self.obstacle_height)
@@ -206,6 +275,9 @@ class Traversability(Node):
             # debris there is still caught when the robot gets within lidar view of it.
             fused[(fused == gu.UNKNOWN) & (sval >= 0) & (sval < 25)] = PROBABLY_FREE
             fused[sval >= 65] = gu.LETHAL
+        for rx, ry in self.robot_spots():             # robots are not walls
+            near = np.hypot(self.nav_X - rx, self.nav_Y - ry) < self.robot_clear
+            fused[near & (fused == gu.LETHAL)] = PROBABLY_FREE
         fused[self.fence] = gu.LETHAL
         out = OccupancyGrid()
         out.header.stamp = now

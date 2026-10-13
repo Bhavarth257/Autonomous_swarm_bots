@@ -2,13 +2,17 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>rescue_dashboard</name>
-  <version>0.1.0</version>
-  <description>PyQt5 mission control for the rescue swarm: start/stop/return, live map, robots, victims, camera.</description>
+  <version>0.2.0</version>
+  <description>Web mission control for the rescue swarm (http://localhost:8080): live map, cameras, victims, charts, operator takeover and teleop, live victim placement.</description>
   <maintainer email="bhavarthkokane25@gmail.com">bhavarth</maintainer>
   <license>Apache-2.0</license>
 
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>python3-pyqt5</exec_depend>
+  <exec_depend>python3-aiohttp</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>rescue_world</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>

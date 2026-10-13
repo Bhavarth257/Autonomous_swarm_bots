@@ -72,7 +72,8 @@ class Evaluator(Node):
         self.robots = list(self.declare_parameter('robots', ['r1', 'r2', 'r3']).value)
         self.duration = self.declare_parameter('duration', 1200.0).value
         self.out = os.path.expanduser(self.declare_parameter('out', '~/rescue_reports/eval').value)
-        base = os.path.expanduser(f'~/.ros/rescue_worlds/rescue_{self.seed}')
+        world_json = self.declare_parameter('world_json', '').value
+        base = world_json[:-5] if world_json else os.path.expanduser(f'~/.ros/rescue_worlds/rescue_{self.seed}')
         with open(base + '.json') as f:
             self.gt = json.load(f)
         self.floor = reachable_floor(base)
@@ -83,9 +84,14 @@ class Evaluator(Node):
             self.create_subscription(String, f'/{r}/mission/status',
                                      lambda m, r=r: self.status.__setitem__(r, json.loads(m.data)), 10)
             self.create_subscription(Odometry, f'/{r}/ground_truth/odom', lambda m, r=r: self.on_gt(r, m), 10)
+        # Victims the operator places during the run (dashboard) count too.
+        self.create_subscription(String, '/scenario/ground_truth', self.on_truth, LATCHED)
         self.started = None
         self.finished = False
         self.create_timer(2.0, self.check)
+
+    def on_truth(self, msg):
+        self.gt['victims'] = json.loads(msg.data)
 
     def now(self):
         return self.get_clock().now().nanoseconds * 1e-9

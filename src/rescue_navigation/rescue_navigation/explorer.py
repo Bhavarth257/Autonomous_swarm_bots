@@ -2,6 +2,10 @@
 
 States: IDLE -> (start) -> EXPLORING -> (no frontiers left / time limit / return_home)
         -> RETURNING -> DONE.   stop -> STOPPED (start resumes exploring).
+Operator intervention (from the dashboard):
+        takeover -> MANUAL      autonomy paused; the operator drives cmd_vel (teleop)
+        goto (point, world frame) -> OPERATOR_GOAL -> MANUAL when reached
+        resume -> EXPLORING
 
 Frontiers are walkable cells of nav_map next to unknown cells, inside the building
 outline (the outline is known to the rescuers; the robot starts outside it). The
@@ -14,7 +18,9 @@ blacklisted so the mission always ends.
                                  goals (avoided) and areas they explored (skipped)
   out  mission/status            std_msgs/String, JSON, 1 Hz (for the dashboard)
        explore/markers           frontier and goal markers for RViz
-  srv  mission/start, mission/stop, mission/return_home   (std_srvs/Trigger)
+  srv  mission/start, mission/stop, mission/return_home, mission/takeover,
+       mission/resume   (std_srvs/Trigger)
+  in   mission/goto      geometry_msgs/PointStamped, world frame: walk there (operator)
   act  navigate_to_pose          (Nav2)
 """
 import base64
@@ -24,14 +30,14 @@ import math
 import numpy as np
 import rclpy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from nav2_msgs.srv import ManageLifecycleNodes
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from std_msgs.msg import String
+from std_msgs.msg import Empty, String
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -42,6 +48,7 @@ LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                      reliability=ReliabilityPolicy.RELIABLE)
 
 IDLE, EXPLORING, RETURNING, DONE, STOPPED = 'idle', 'exploring', 'returning', 'done', 'stopped'
+MANUAL, OPERATOR_GOAL = 'manual', 'operator goal'
 
 
 class Explorer(Node):
@@ -78,7 +85,9 @@ class Explorer(Node):
         self.goal = None              # (x, y) in map frame
         self.goal_handle = None
         self.pending = False          # goal sent, Nav2 hasn't accepted it yet
+        self.deferred = None          # (x, y, kind) to send once Nav2's action server is up
         self.goal_sent_at = 0.0
+        self.goal_sent_pose = None
         self.blacklist = []
         self.empty_checks = 0
         self.started_at = None
@@ -110,6 +119,7 @@ class Explorer(Node):
         # door jamb, inside the costmap's inscribed zone so nothing can be planned) it
         # crab-walks away from the nearest obstacles for a moment.
         self.pub_cmd = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.pub_forget = self.create_publisher(Empty, 'traversability/forget_near', 10)
         self.fail_streak = 0
         self.escapes = []              # (x, y) of recent escapes: vary the direction if stuck again
         self.escape_cmd = None
@@ -119,6 +129,9 @@ class Explorer(Node):
         self.create_service(Trigger, 'mission/start', self.srv_start)
         self.create_service(Trigger, 'mission/stop', self.srv_stop)
         self.create_service(Trigger, 'mission/return_home', self.srv_return)
+        self.create_service(Trigger, 'mission/takeover', self.srv_takeover)
+        self.create_service(Trigger, 'mission/resume', self.srv_resume)
+        self.create_subscription(PointStamped, 'mission/goto', self.on_goto, 10)
         self.create_timer(1.0, self.step)
         if auto_start:
             self.start()
@@ -154,6 +167,40 @@ class Explorer(Node):
         self.go_home('return requested by operator')
         res.success, res.message = True, 'returning'
         return res
+
+    def srv_takeover(self, _req, res):
+        self.cancel_goal()
+        self.escape_cmd = None
+        if self.started_at is None and self.state in (IDLE, DONE, STOPPED):
+            self.started_at = self.now()
+        self.state = MANUAL
+        self.message = 'operator in control (teleop)'
+        self.get_logger().info('operator took over')
+        res.success, res.message = True, 'manual'
+        return res
+
+    def srv_resume(self, _req, res):
+        self.cancel_goal()
+        self.state = EXPLORING
+        self.empty_checks = 0
+        if self.started_at is None:
+            self.started_at = self.now()
+        self.message = 'autonomy resumed'
+        self.get_logger().info('autonomy resumed by operator')
+        res.success, res.message = True, 'exploring'
+        return res
+
+    def on_goto(self, msg: PointStamped):
+        """Operator goal in the world (building) frame -> this robot's map frame."""
+        mx, my, myaw = self.map_in_world
+        c, s = math.cos(-myaw), math.sin(-myaw)
+        dx, dy = msg.point.x - mx, msg.point.y - my
+        if self.started_at is None:
+            self.started_at = self.now()
+        self.state = OPERATOR_GOAL
+        self.message = f'going to operator point ({msg.point.x:.1f}, {msg.point.y:.1f})'
+        self.get_logger().info(self.message)
+        self.send_goal(c * dx - s * dy, s * dx + c * dy, 'operator')
 
     def _pause_clock(self):
         if self.started_at is not None:
@@ -221,6 +268,8 @@ class Explorer(Node):
     # ---- main loop -----------------------------------------------------------
     def step(self):
         have_pose = self.update_pose()
+        if self.deferred and self.nav.server_is_ready():
+            self.send_goal(*self.deferred)
         if self.state in (EXPLORING, RETURNING) and have_pose:
             if self.elapsed() > self.time_limit and self.state == EXPLORING:
                 self.go_home('time limit reached')
@@ -379,8 +428,12 @@ class Explorer(Node):
 
     def send_goal(self, x, y, kind):
         if not self.nav.server_is_ready():
+            # Keep it (operator points and the way home must not be lost); step() retries.
+            if kind != 'frontier':
+                self.deferred = (x, y, kind)
             self.message = 'waiting for Nav2'
             return
+        self.deferred = None
         goal = NavigateToPose.Goal()
         ps = PoseStamped()
         ps.header.frame_id = self.map_frame
@@ -391,6 +444,7 @@ class Explorer(Node):
         goal.pose = ps
         self.goal = (x, y)
         self.goal_sent_at = self.now()
+        self.goal_sent_pose = self.pose
         self.last_progress = (self.pose, self.now())
         self.pending = True
         future = self.nav.send_goal_async(goal)
@@ -403,10 +457,12 @@ class Explorer(Node):
         if not handle.accepted:
             # Rejected means Nav2 isn't active (yet), not that the spot is unreachable:
             # don't blacklist it; restart Nav2 if it keeps happening.
-            self.get_logger().warn(f'{kind} goal {goal} rejected')
+            self.get_logger().warn(f'{kind} goal {goal} rejected (Nav2 not active yet?)')
             self.goal = None
+            if kind != 'frontier':
+                self.deferred = (goal[0], goal[1], kind)     # retried by step()
             self.rejections += 1
-            if self.rejections >= 2:
+            if self.rejections >= 5:
                 self.restart_nav2()
             return
         if self.goal != goal:          # superseded while we waited
@@ -420,10 +476,21 @@ class Explorer(Node):
         if self.goal != goal:
             return                     # an older goal that was replaced
         self.goal_handle = None
-        quick_fail = (status == GoalStatus.STATUS_ABORTED and self.now() - self.goal_sent_at < 15.0)
+        # Failed fast, or failed without the robot getting anywhere (Nav2's recoveries can
+        # take longer than 15 s, and each new goal restarts the no-progress timer, so a
+        # boxed-in robot would otherwise cycle through goals forever).
+        stayed = (self.pose is not None and self.goal_sent_pose is not None and
+                  math.hypot(self.pose[0] - self.goal_sent_pose[0], self.pose[1] - self.goal_sent_pose[1]) < 0.3)
+        quick_fail = status == GoalStatus.STATUS_ABORTED and (self.now() - self.goal_sent_at < 15.0 or stayed)
         self.fail_streak = self.fail_streak + 1 if quick_fail else 0
         if self.fail_streak >= 3:
             self.start_escape()
+        if kind == 'operator':
+            if self.state == OPERATOR_GOAL:
+                self.state = MANUAL
+                self.message = ('reached the operator point, holding' if status == GoalStatus.STATUS_SUCCEEDED
+                                else 'could not reach the operator point, holding')
+            return
         if kind == 'home':
             if status == GoalStatus.STATUS_SUCCEEDED:
                 self.state = DONE
@@ -439,9 +506,11 @@ class Explorer(Node):
             self.add_blacklist(goal)
         self.goal = None
 
-    def start_escape(self, seconds=3.0, speed=0.2):
-        """Walk (sideways if need be) away from lethal cells within 0.6 m."""
+    def start_escape(self, seconds=4.0, speed=0.3):
+        """Walk (sideways if need be) away from lethal cells within 0.6 m. Obstacles that
+        close may be stale (the lidar can't see there), so the height map forgets them."""
         self.fail_streak = 0
+        self.pub_forget.publish(Empty())
         if self.grid is None or self.pose is None:
             return
         res = self.info.resolution
@@ -501,6 +570,7 @@ class Explorer(Node):
             command=ManageLifecycleNodes.Request.RESET)).add_done_callback(startup)
 
     def cancel_goal(self):
+        self.deferred = None
         if self.goal_handle is not None:
             self.goal_handle.cancel_goal_async()
         self.goal_handle = None

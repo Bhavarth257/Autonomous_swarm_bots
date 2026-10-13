@@ -225,6 +225,20 @@
     </sensor>
   </gazebo>
 
+  <!-- Headlight in the sensor head: dark rooms under a collapsed roof stay visible to the
+       camera within a few metres (the thermal camera doesn't need light). -->
+  <gazebo reference="camera_link">
+    <light name="headlight" type="spot">
+      <pose>0.02 0 0 0 0 0</pose>
+      <diffuse>0.55 0.53 0.5 1</diffuse>
+      <specular>0.05 0.05 0.05 1</specular>
+      <attenuation><range>7</range><constant>0.8</constant><linear>0.15</linear><quadratic>0.04</quadratic></attenuation>
+      <spot><inner_angle>0.5</inner_angle><outer_angle>0.9</outer_angle><falloff>1.0</falloff></spot>
+      <cast_shadows>false</cast_shadows>
+      <direction>1 0 0</direction>      <!-- along the camera link's forward axis -->
+    </light>
+  </gazebo>
+
   <!-- Thermal camera next to the RGB one (same optical frame). Pixels are temperatures
        in kelvin x 100 (16 bit): skin ~309 K, debris warmed by a buried body ~303 K,
        ambient 293 K, smouldering debris 330+ K. -->
@@ -284,6 +298,9 @@
       <climb_tilt_full>${radians(25)}</climb_tilt_full>
       <climb_min_scale>0.4</climb_min_scale>
       <!-- joint states at 30 Hz (Gazebo's JointStatePublisher sends 250 Hz and floods /tf) -->
+      <terrain_topic>/${ns}/terrain_ahead</terrain_topic>
+      <max_step_height>0.15</max_step_height>
+      <climb_slowdown>0.55</climb_slowdown>
       <joint_state_topic>/${ns}/joint_states</joint_state_topic>
       <joint_state_rate>30</joint_state_rate>
       <level_gain>4.0</level_gain>

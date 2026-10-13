@@ -32,7 +32,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from rescue_bringup import rviz_config
-from rescue_world.generate import DEFAULT_OUT, generate
+from rescue_world.generate import DEFAULT_OUT, generate_from_launch
 
 
 def _robot(ns, spawn, description, slam, odom_drift):
@@ -49,8 +49,12 @@ def _robot(ns, spawn, description, slam, odom_drift):
         Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
              name='cloud_to_scan', namespace=ns,
              remappings=[('cloud_in', 'lidar/points'), ('scan', 'scan')],
+             # The SLAM scan starts above a hexapod's height (0.31 m): a teammate walking past
+             # would otherwise become a wall in the map, and one recorded closer than the
+             # scan's 0.45 m minimum range is never cleared again, trapping the robot.
+             # Anything lower is the 3D height map's job (traversability).
              parameters=[{'target_frame': f'{ns}/base_footprint', 'transform_tolerance': 0.05,
-                          'min_height': 0.25, 'max_height': 1.5,
+                          'min_height': 0.40, 'max_height': 1.5,
                           'angle_min': -3.14159, 'angle_max': 3.14159, 'angle_increment': 0.0087,
                           'scan_time': 0.1, 'range_min': 0.45, 'range_max': 15.0,
                           'use_inf': True, **sim_time}]),
@@ -70,6 +74,7 @@ def _robot(ns, spawn, description, slam, odom_drift):
 def _bridge_topics(ns):
     return [
         f'/{ns}/cmd_vel@geometry_msgs/msg/Twist]ignition.msgs.Twist',
+        f'/{ns}/terrain_ahead@std_msgs/msg/Float32]ignition.msgs.Float',
         f'/{ns}/ground_truth/odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry',
         f'/{ns}/joint_states@sensor_msgs/msg/JointState[ignition.msgs.Model',
         f'/{ns}/lidar/points@sensor_msgs/msg/PointCloud2[ignition.msgs.PointCloudPacked',
@@ -86,7 +91,7 @@ def _setup(context):
     seed, n = int(arg('seed')), int(arg('num_robots'))
     gui, rviz, slam, drift = (arg(k) == 'true' for k in ('gui', 'rviz', 'slam', 'odom_drift'))
 
-    paths = generate(seed=seed, out_dir=DEFAULT_OUT, n_robots=max(n, 3))
+    paths = generate_from_launch(seed, n, int(arg('grid')), arg('difficulty'), arg('victims_file'))
     with open(paths['json']) as f:
         gt = json.load(f)
     print(f'[rescue] world {paths["sdf"]} | preview {paths["preview"]}')
@@ -153,6 +158,10 @@ def _clean_env():
 def generate_launch_description():
     return LaunchDescription(_clean_env() + [
         DeclareLaunchArgument('seed', default_value='0', description='world seed'),
+        DeclareLaunchArgument('grid', default_value='4', description='rooms per side (4 -> 4x4)'),
+        DeclareLaunchArgument('difficulty', default_value='normal', description='normal | hard'),
+        DeclareLaunchArgument('victims_file', default_value='',
+                              description='JSON list of {x, y, posture, buried, yaw}: your own victims'),
         DeclareLaunchArgument('num_robots', default_value='1'),
         DeclareLaunchArgument('gui', default_value='true', description='Gazebo GUI'),
         DeclareLaunchArgument('rviz', default_value='true'),

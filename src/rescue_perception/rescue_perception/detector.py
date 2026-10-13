@@ -110,6 +110,10 @@ class Detector(Node):
         self.conf = self.declare_parameter('person_confidence', 0.35).value
         self.max_range = self.declare_parameter('max_range', 8.0).value
         self.floor_only_range = self.declare_parameter('floor_only_range', 5.0).value
+        # Victims are inside the building; a teammate hexapod is not a person.
+        self.building = list(self.declare_parameter('building_rect', [-1e9, -1e9, 1e9, 1e9]).value)
+        self.robot_gap = self.declare_parameter('robot_exclusion', 0.7).value
+        self.robot_world = {}         # robot -> (x, y) world, updated as frames are processed
         rate = self.declare_parameter('rate', 6.0).value
 
         self.frames = FrameWatch(self, [(f'{ns}/map', f'{ns}/odom') for ns in robots])
@@ -166,6 +170,7 @@ class Detector(Node):
 
         robot_xy = m_fp[1][:2]
         floor_z = float(m_fp[1][2])
+        self.robot_world[r.ns] = r.to_world(float(robot_xy[0]), float(robot_xy[1]))
         for c in cues:
             K = r.K_rgb if c.source == 'rgb' else r.K_th
             shape = rgb.shape if c.source == 'rgb' else th.shape
@@ -189,6 +194,12 @@ class Detector(Node):
                 continue
             if not (-0.5 < pm[2] - floor_z < 1.5):          # victims are on the floor
                 continue
+            wx, wy = r.to_world(float(pm[0]), float(pm[1]))
+            x0, y0, x1, y1 = self.building
+            if not (x0 - 0.2 < wx < x1 + 0.2 and y0 - 0.2 < wy < y1 + 0.2):
+                continue                                    # outside the building
+            if any(math.hypot(wx - px, wy - py) < self.robot_gap for px, py in self.robot_world.values()):
+                continue                                    # that's a robot, not a person
             dist = float(math.hypot(pm[0] - robot_xy[0], pm[1] - robot_xy[1]))
             r.tracker.add(c.source, float(pm[0]), float(pm[1]), t_img, tuple(robot_xy),
                           temp_k=c.temp_k, found_by=r.ns, distance=dist)
@@ -261,6 +272,9 @@ def main():
         rclpy.spin(node)
     except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
+    except Exception:
+        if rclpy.ok():                 # a real error, not a publish racing Ctrl+C
+            raise
 
 
 if __name__ == '__main__':

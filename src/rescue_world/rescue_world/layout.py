@@ -6,6 +6,10 @@ Pure geometry, no ROS or SDF: ``generate_layout`` returns a ``Layout`` that
 Frame: the building spans [0, width] x [0, height] metres, the entrance is a
 gap in the south wall (y = 0) and the robots spawn just outside it.
 
+Difficulty "hard" adds narrower doors, more rubble, stepped debris, smoke (blinds the
+camera, not the thermal sensor) and rooms under a collapsed roof (dark).
+Victims can be given by the user (custom_victims) instead of being placed at random.
+
 Obstacles come in two classes for the walking hexapods:
   climbable  low blocks, thin beams, gravel, ramped rubble mounds (<= CLIMB_MAX_H steps)
   blocking   walls, tall rubble piles, leaning slabs, tall beams, victims, buried-victim piles
@@ -25,6 +29,7 @@ from rescue_world.primitives import Footprint, Part
 WALL_T = 0.2           # wall thickness
 WALL_H = 2.2           # intact wall height
 DOOR_W = 1.0
+DOOR_W_HARD = 0.85
 ENTRANCE_W = 1.4
 ROBOT_RADIUS = 0.30    # used to inflate blocking obstacles for the reachability check
 GRID_RES = 0.05
@@ -74,6 +79,8 @@ class Layout:
     entrance: tuple            # x, y, width
     spawns: list               # (x, y, yaw) per robot
     doors: list                # (x, y, blocked)
+    difficulty: str = 'normal'
+    extras: list = field(default_factory=list)   # smoke volumes, dark rooms (for the SDF writer)
     grid: np.ndarray | None = None        # blocking obstacles
     climbable: np.ndarray | None = None   # climbable obstacles (not blocking)
     reachable: np.ndarray | None = None   # inflated free space reachable from spawn
@@ -92,9 +99,12 @@ def _seg_dist(px, py, ax, ay, bx, by):
 
 
 class _Builder:
-    def __init__(self, rng: random.Random, cols, rows, room_w, room_h, victim_style='primitive'):
+    def __init__(self, rng: random.Random, cols, rows, room_w, room_h, victim_style='primitive',
+                 hard=False):
         self.rng = rng
         self.victim_style = victim_style
+        self.hard = hard
+        self.extras = []
         self.cols, self.rows = cols, rows
         self.cw, self.rh = room_w, room_h
         self.width, self.height = cols * room_w, rows * room_h
@@ -324,6 +334,51 @@ class _Builder:
             self._bury(v)
         return v
 
+    def place_victim_at(self, vid, kind, posture, x, y, yaw):
+        """A user-placed victim (no free-space search: the user decides)."""
+        room = (min(self.cols - 1, max(0, int(x // self.cw))), min(self.rows - 1, max(0, int(y // self.rh))))
+        v = Victim(vid, kind, posture, x, y, yaw, room,
+                   humans.build(posture, self.rng, warm=True, style=self.victim_style))
+        c, s = math.cos(yaw), math.sin(yaw)
+        if posture == 'lying':
+            width = 1.4 if self.victim_style == 'randy' else 0.6
+            self.footprints.append(Footprint(x - 0.22 * c, y - 0.22 * s, yaw, 1.8, width))
+            self.blobs.append((x - 0.22 * c, y - 0.22 * s, 0.95))
+        else:
+            self.footprints.append(Footprint(x + 0.43 * c, y + 0.43 * s, yaw, 1.2, 0.6))
+            self.blobs.append((x + 0.43 * c, y + 0.43 * s, 0.65))
+        if kind == 'buried':
+            self._bury(v)
+        return v
+
+    def stairs(self, room):
+        """Stepped debris: three 8 cm steps up to a 24 cm landing (climbable one step at a time)."""
+        p = self.sample_free(room, 1.0, passage_clear=0.9)
+        if p is None:
+            return
+        yaw = self.rng.uniform(-math.pi, math.pi)
+        c, s = math.cos(yaw), math.sin(yaw)
+        color = self.rubble_color()
+        for k, (depth, h) in enumerate(((1.5, 0.08), (1.05, 0.16), (0.6, 0.24))):
+            off = (1.5 - depth) / 2                 # steps share the back edge
+            self.box('step', (depth, 1.0, h), (p[0] + off * c, p[1] + off * s, h / 2, 0, 0, yaw),
+                     color, footprint=False)
+        self.footprints.append(Footprint(p[0], p[1], yaw, 1.5, 1.0, True))
+        self.blobs.append((p[0], p[1], 1.0))
+
+    def smoke(self, room):
+        x0, x1, y0, y1 = self.room_bounds(*room, margin=0.4)
+        self.extras.append({'type': 'smoke', 'x': (x0 + x1) / 2, 'y': (y0 + y1) / 2,
+                            'sx': x1 - x0, 'sy': y1 - y0})
+
+    def roof(self, room):
+        """Collapsed roof slab over a room: no daylight inside (lidar is unaffected)."""
+        x0, x1, y0, y1 = self.room_bounds(*room, margin=-0.1)
+        self.parts.append(Part(self._name('roof'), 'box', (x1 - x0, y1 - y0, 0.15),
+                               ((x0 + x1) / 2, (y0 + y1) / 2, 2.35, self.rng.uniform(-0.03, 0.03),
+                                self.rng.uniform(-0.03, 0.03), 0), (0.35, 0.34, 0.33)))
+        self.extras.append({'type': 'dark', 'room': list(room)})
+
     def _wall_spot(self, room):
         x0, x1, y0, y1 = self.room_bounds(*room)
         for _ in range(30):
@@ -419,7 +474,7 @@ def _flood(blocked, start):
     return reach
 
 
-def _check(b: _Builder, layout: Layout):
+def _check(b: _Builder, layout: Layout, check_victims=True):
     """Every room and every victim must be reachable (or, if buried, observable) from the
     spawn, climbing over climbable debris where needed."""
     ox, oy = -2.0, -3.5
@@ -446,35 +501,41 @@ def _check(b: _Builder, layout: Layout):
                         int((x0 - ox) / GRID_RES):int((x1 - ox) / GRID_RES)]
             if sub.sum() * GRID_RES ** 2 < 1.0:
                 raise LayoutError(f'room {(i, j)} unreachable')
-    for v in layout.victims:
+    for v in layout.victims if check_victims else []:      # user-placed victims: user's call
         if cells_near(v.x, v.y, 1.8 if v.kind == 'visible' else 3.0) == 0:
             raise LayoutError(f'{v.id} unreachable')
 
 
-def generate_layout(seed=0, cols=3, rows=3, room_w=6.0, room_h=5.0,
+def generate_layout(seed=0, cols=4, rows=4, room_w=6.0, room_h=5.0,
                     n_visible=4, n_buried=2, n_decoys=1, n_robots=3, max_attempts=50,
-                    victim_style='auto') -> Layout:
-    """victim_style: 'randy' (Fuel mannequin meshes), 'primitive', or 'auto' (randy if cached)."""
+                    victim_style='auto', difficulty='normal', custom_victims=None) -> Layout:
+    """victim_style: 'randy' (Fuel mannequin meshes), 'primitive', or 'auto' (randy if cached).
+    difficulty: 'normal' or 'hard'.
+    custom_victims: list of {x, y, posture: lying|sitting, buried: bool, yaw (deg, optional)}
+    replacing the random victims."""
     if victim_style == 'auto':
         victim_style = 'randy' if humans.randy_available() else 'primitive'
     last = None
     for attempt in range(max_attempts):
         try:
             return _try(seed, attempt, cols, rows, room_w, room_h,
-                        n_visible, n_buried, n_decoys, n_robots, victim_style)
+                        n_visible, n_buried, n_decoys, n_robots, victim_style, difficulty, custom_victims)
         except LayoutError as e:
             last = e
     raise LayoutError(f'seed {seed}: no valid layout in {max_attempts} attempts ({last})')
 
 
 def _try(seed, attempt, cols, rows, room_w, room_h, n_visible, n_buried, n_decoys, n_robots,
-         victim_style):
+         victim_style, difficulty='normal', custom_victims=None):
     rng = random.Random(seed * 1000 + attempt)
-    b = _Builder(rng, cols, rows, room_w, room_h, victim_style)
+    hard = difficulty == 'hard'
+    b = _Builder(rng, cols, rows, room_w, room_h, victim_style, hard)
     W, H = b.width, b.height
+    door_w = DOOR_W_HARD if hard else DOOR_W
 
-    # Outer shell: entrance centred in the south wall.
-    ex = W / 2
+    # Outer shell: entrance in the middle of a south room (never where an interior wall
+    # meets the outer one, which happens at W/2 with an even number of columns).
+    ex = (cols // 2 + 0.5) * room_w
     b.passages.append((ex, 0.0))
     b.wall(0, 0, W, 0, [(ex, ENTRANCE_W)], damaged=True)
     b.wall(W, 0, W, H, [], damaged=True)
@@ -491,18 +552,18 @@ def _try(seed, attempt, cols, rows, room_w, room_h, n_visible, n_buried, n_decoy
         L = math.hypot(bx - ax, by - ay)
         ux, uy = (bx - ax) / L, (by - ay) / L
         td = rng.uniform(0.9, L - 0.9)
-        gaps = [(td, DOOR_W)]
+        gaps = [(td, door_w)]
         door = [ax + ux * td, ay + uy * td, False]
         b.doors.append(door)
-        if rng.random() < 0.3:
+        if rng.random() < (0.2 if hard else 0.3):
             wb = rng.uniform(0.8, 1.3)
             for _ in range(10):
                 tb = rng.uniform(wb / 2 + 0.4, L - wb / 2 - 0.4)
-                if abs(tb - td) > (wb + DOOR_W) / 2 + 0.6:
+                if abs(tb - td) > (wb + door_w) / 2 + 0.6:
                     gaps.append((tb, wb))
                     b.passages.append((ax + ux * tb, ay + uy * tb))
                     break
-        if rng.random() < 0.2:
+        if rng.random() < (0.25 if hard else 0.2):
             door[2] = True
             blocked_doors.append(door)
         else:
@@ -523,21 +584,41 @@ def _try(seed, attempt, cols, rows, room_w, room_h, n_visible, n_buried, n_decoy
     victims = []
     order = rooms[:]
     rng.shuffle(order)
-    kinds = ['visible'] * n_visible + ['buried'] * n_buried
-    rng.shuffle(kinds)
-    for k, kind in enumerate(kinds):
-        v = b.place_victim(f'victim_{k}', kind, order[k % len(order)])
-        if v is None:
-            raise LayoutError(f'could not place victim_{k}')
-        victims.append(v)
+    if custom_victims:
+        kinds = []
+        for k, cv in enumerate(custom_victims):
+            kind = 'buried' if cv.get('buried') else 'visible'
+            posture = 'lying' if kind == 'buried' else cv.get('posture', 'lying')
+            yaw = math.radians(cv['yaw']) if 'yaw' in cv else rng.uniform(-math.pi, math.pi)
+            victims.append(b.place_victim_at(f'victim_{k}', kind, posture, float(cv['x']), float(cv['y']), yaw))
+    else:
+        kinds = ['visible'] * n_visible + ['buried'] * n_buried
+        rng.shuffle(kinds)
+        for k, kind in enumerate(kinds):
+            v = b.place_victim(f'victim_{k}', kind, order[k % len(order)])
+            if v is None:
+                raise LayoutError(f'could not place victim_{k}')
+            victims.append(v)
     decoys = []
     for k in range(n_decoys):
         d = b.decoy(f'decoy_{k}', order[(len(kinds) + k) % len(order)])
         if d is not None:
             decoys.append(d)
 
+    if hard:
+        # Dark rooms and smoke away from the entrance room, so the robots get started.
+        entrance_room = (cols // 2, 0)
+        others = [r for r in rooms if r != entrance_room]
+        rng.shuffle(others)
+        n_dark, n_smoke = max(1, len(rooms) // 6), max(1, len(rooms) // 4)
+        for room in others[:n_dark]:
+            b.roof(room)
+        for room in others[n_dark:n_dark + n_smoke]:
+            b.smoke(room)
     for room in rooms:
-        for _ in range(rng.choice([0, 1, 1, 2])):
+        if hard and rng.random() < 0.35:
+            b.stairs(room)
+        for _ in range(rng.choice([1, 1, 2, 2] if hard else [0, 1, 1, 2])):
             p = b.sample_free(room, 0.9, passage_clear=1.0)
             if p:
                 b.rubble_pile(p[0], p[1], rng.uniform(0.4, 0.8), rng.randint(5, 10))
@@ -552,6 +633,6 @@ def _try(seed, attempt, cols, rows, room_w, room_h, n_visible, n_buried, n_decoy
 
     spawns = [(ex + (k - (n_robots - 1) / 2) * 1.0, -2.0, math.pi / 2) for k in range(n_robots)]
     layout = Layout(seed, attempt, W, H, cols, rows, b.parts, b.footprints, victims, decoys,
-                    (ex, 0.0, ENTRANCE_W), spawns, [tuple(d) for d in b.doors])
-    _check(b, layout)
+                    (ex, 0.0, ENTRANCE_W), spawns, [tuple(d) for d in b.doors], difficulty, b.extras)
+    _check(b, layout, check_victims=not custom_victims)
     return layout
