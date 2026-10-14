@@ -76,11 +76,11 @@ def to_numpy(msg: Image):
 class RobotPipeline:
     """Everything one robot's detector keeps."""
 
-    def __init__(self, node, ns, map_in_world, frames):
+    def __init__(self, node, ns, map_in_world, frames, body_height=0.15):
         self.ns = ns
         self.node = node
         self.map_in_world = map_in_world
-        self.pose = BodyPose(node, frames, f'{ns}/', topic_ns=f'/{ns}/')
+        self.pose = BodyPose(node, frames, f'{ns}/', body_height, topic_ns=f'/{ns}/')
         self.tracker = tk.Tracker()
         self.rgb = self.thermal = self.cloud = None
         self.K_rgb = self.K_th = None
@@ -124,12 +124,14 @@ class Detector(Node):
         # Victims are inside the building; a teammate hexapod is not a person.
         self.building = list(self.declare_parameter('building_rect', [-1e9, -1e9, 1e9, 1e9]).value)
         self.robot_gap = self.declare_parameter('robot_exclusion', 0.7).value
+        self.teammate_radius = self.declare_parameter('teammate_radius', 0.3).value
+        self.body_height = self.declare_parameter('body_height', 0.15).value
         self.robot_world = {}         # robot -> (x, y) world, updated as frames are processed
         rate = self.declare_parameter('rate', 6.0).value
 
         self.frames = FrameWatch(self, [(f'{ns}/map', f'{ns}/odom') for ns in robots])
         self.robots = [RobotPipeline(self, ns, poses[3 * k:3 * k + 3] if len(poses) >= 3 * k + 3
-                                     else [0.0, 0.0, 0.0], self.frames)
+                                     else [0.0, 0.0, 0.0], self.frames, self.body_height)
                        for k, ns in enumerate(robots)]
         self.yolo, self.device = load_yolo(weights, self.get_logger())
         self.turn = 0
@@ -188,7 +190,7 @@ class Detector(Node):
             if vi.touches_border(c.box, shape):
                 continue          # partly out of view: its bottom edge isn't where it stands
             if c.source == 'rgb' and any(
-                    vi.box_covers(K, m_cam[0], m_cam[1], (*r.to_map(px, py), floor_z + 0.2), c.box, 0.3)
+                    vi.box_covers(K, m_cam[0], m_cam[1], (*r.to_map(px, py), floor_z + 0.2), c.box, self.teammate_radius)
                     for ns, (px, py) in self.robot_world.items() if ns != r.ns):
                 continue          # a teammate: YOLO sometimes takes the black hexapod for a person
             # Distance from the box's bottom edge meeting the floor; lidar refines it when

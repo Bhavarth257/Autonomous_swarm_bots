@@ -120,6 +120,35 @@ def reachable(grid: np.ndarray, start: tuple, radius_cells: int, search_cells: i
     return labels == lab
 
 
+def path_distance(passable: np.ndarray, start: tuple, resolution: float, coarse: int = 4,
+                  max_m: float = 60.0) -> np.ndarray:
+    """Walking distance (m) from `start` (row, col) to every passable cell, by a wavefront
+    over a `coarse`-times coarser grid (fast enough to run every second); inf where it
+    can't get. Straight-line distance misjudges a frontier just behind a wall."""
+    h, w = passable.shape
+    H, W = -(-h // coarse), -(-w // coarse)
+    pad = np.zeros((H * coarse, W * coarse), dtype=bool)
+    pad[:h, :w] = passable
+    cp = pad.reshape(H, coarse, W, coarse).any(axis=(1, 3))
+    step = resolution * coarse
+    dist = np.full((H, W), np.inf)
+    sj, si = start[0] // coarse, start[1] // coarse
+    if 0 <= sj < H and 0 <= si < W:
+        front = np.zeros((H, W), dtype=bool)
+        front[sj, si] = True
+        cp[sj, si] = True
+        seen = front.copy()
+        dist[sj, si] = 0.0
+        eight = np.ones((3, 3), dtype=bool)
+        for k in range(1, int(max_m / step) + 1):
+            front = ndimage.binary_dilation(front, eight) & cp & ~seen
+            if not front.any():
+                break
+            dist[front] = k * step
+            seen |= front
+    return np.repeat(np.repeat(dist, coarse, axis=0), coarse, axis=1)[:h, :w]
+
+
 def nearest_true(mask: np.ndarray, cell: tuple, radius: int):
     """(row, col) of the True cell nearest to `cell` within `radius` cells, else (None, None)."""
     j, i = cell

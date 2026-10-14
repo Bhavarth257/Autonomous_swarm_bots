@@ -32,7 +32,6 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
-from nav2_msgs.srv import ManageLifecycleNodes
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -43,6 +42,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from rescue_navigation import grid_utils as gu
 from rescue_navigation.body_pose import FrameWatch, compose, quat_rpy, rpy_matrix
+from rescue_navigation.nav2_bringup import Nav2Bringup
 
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                      reliability=ReliabilityPolicy.RELIABLE)
@@ -73,6 +73,8 @@ class Explorer(Node):
         # Be back by the time limit: head home once the walk back (straight line x detour,
         # at the average speed through rubble, plus a margin) would take what's left.
         self.return_speed = self.declare_parameter('return_speed', 0.15).value
+        # Can it walk sideways (hexapod)? A skid-steer rover can't: it backs or drives out.
+        self.holonomic = self.declare_parameter('holonomic', True).value
         self.return_detour = self.declare_parameter('return_detour', 1.5).value
         self.return_margin = self.declare_parameter('return_margin', 30.0).value
         self.done_checks = self.declare_parameter('empty_checks_to_finish', 10).value
@@ -109,8 +111,8 @@ class Explorer(Node):
         self.odom = None
         self.create_subscription(Odometry, 'odom', lambda m: setattr(self, 'odom', m), 10)
         self.nav = ActionClient(self, NavigateToPose, 'navigate_to_pose')
-        # If Nav2's bringup failed (goals get rejected), ask its lifecycle manager to retry.
-        self.nav2_manager = self.create_client(ManageLifecycleNodes, 'lifecycle_manager_navigation/manage_nodes')
+        # This node brings Nav2 up itself and keeps it up (see nav2_bringup).
+        self.nav2 = Nav2Bringup(self)
         self.rejections = 0
         self.nav2_restart_at = -1e9
         self.nav2_missing_since = None   # when Nav2's action server was first found missing
@@ -119,6 +121,13 @@ class Explorer(Node):
         self.team_grid = None          # (mask, x0, y0, res): explored by teammates
         self.team_union = None         # (mask, x0, y0, res): explored by anyone
         self.spread = self.declare_parameter('teammate_spread', 3.0).value
+        # Home sector: the building split into side-by-side strips, one per robot (r1 left).
+        # Frontiers elsewhere cost extra, so robots spread out even without radio contact,
+        # and one that has finished its strip still goes to help.
+        ns_digits = ''.join(ch for ch in self.get_namespace() if ch.isdigit())
+        self.robot_index = self.declare_parameter('robot_index', max(0, int(ns_digits or 1) - 1)).value
+        self.team_size = self.declare_parameter('team_size', 1).value
+        self.sector_penalty = self.declare_parameter('sector_penalty', 5.0).value
         self.create_subscription(String, 'team/state', self.on_team, LATCHED)
         self.pub_status = self.create_publisher(String, 'mission/status', 10)
         # Unstick: after repeated quick goal failures (typically the robot brushing a
@@ -139,6 +148,8 @@ class Explorer(Node):
         self.create_service(Trigger, 'mission/resume', self.srv_resume)
         self.create_subscription(PointStamped, 'mission/goto', self.on_goto, 10)
         self.create_timer(1.0, self.step)
+        self.wall_clock = rclpy.clock.Clock()          # Nav2 bringup runs before /clock is up
+        self.create_timer(1.0, self.nav2_tick, clock=self.wall_clock)
         if auto_start:
             self.start()
 
@@ -297,8 +308,12 @@ class Explorer(Node):
         rx, ry = self.pose[0], self.pose[1]
         # Only frontiers the robot can actually get to: behind a rubble-blocked door they
         # would cost a minute of failed planning each.
-        reach = gu.reachable(self.grid, (int((ry - oy) / res), int((rx - ox) / res)),
-                             int(round(self.robot_radius / res)))
+        start = (int((ry - oy) / res), int((rx - ox) / res))
+        reach = gu.reachable(self.grid, start, int(round(self.robot_radius / res)))
+        # Walking distance, not straight line: a frontier behind a wall is far away.
+        walk = gu.path_distance(reach, start, res)
+        unknown = (self.grid == gu.UNKNOWN) & (self.region if self.region is not None else True)
+        g = int(1.5 / res)
         near = gu.ndimage.binary_dilation(reach, structure=gu.disk(int(0.3 / res)))
         mask = gu.frontier_mask(self.grid, self.region) & near
         found = []
@@ -320,11 +335,21 @@ class Explorer(Node):
             target = np.array([ox + (i + 0.5) * res, oy + (j + 0.5) * res])
             if self.explored_by_team(*self.to_world(*target)):
                 continue                  # a teammate has already seen what lies beyond
-            found.append((target, len(cl) * res))
+            if self.blacklisted(*target):
+                continue                  # snapping to a reachable cell led back to a spot that failed
+            # What going there reveals: unknown floor within 1.5 m of the frontier. A frontier
+            # with next to nothing behind it is map noise (e.g. in the lidar's blind ring).
+            gain = float(unknown[max(0, j - g):j + g + 1, max(0, i - g):i + g + 1].sum()) * res * res
+            if gain < 0.3:
+                continue
+            d = walk[j, i] if np.isfinite(walk[j, i]) else 1.5 * math.hypot(target[0] - rx, target[1] - ry)
+            found.append((target, len(cl) * res, gain, d))
         if not found:
             # Own map has no open edges left that a teammate hasn't covered: go to the edge of
             # what *nobody* has seen yet. The planner can cross space this robot never mapped.
-            found = self.team_frontiers(reach, res, ox, oy)
+            found = [(t, size, size, walk[self._cell(t)] if np.isfinite(walk[self._cell(t)])
+                      else 1.5 * math.hypot(t[0] - rx, t[1] - ry))
+                     for t, size in self.team_frontiers(reach, res, ox, oy)]
         self.n_frontiers = len(found)
         self.frontier_points = [f[0] for f in found]
 
@@ -355,17 +380,36 @@ class Explorer(Node):
                 return
 
         def score(f):
-            (x, y), length = f
-            s = min(length, 4.0) - math.hypot(x - rx, y - ry)
+            (x, y), length, gain, dist = f
+            s = min(gain, 6.0) + 0.5 * min(length, 4.0) - dist
             wx, wy = self.to_world(x, y)
+            s -= self.sector_cost(wx)
             # Spread out: frontiers near a teammate or its claimed goal are worth less.
             for ox_, oy_ in self.team_others:
                 d = math.hypot(wx - ox_, wy - oy_)
                 if d < self.spread:
                     s -= 2.0 * (self.spread - d)
             return s
-        target, _ = max(found, key=score)
+        target = max(found, key=score)[0]
         self.send_goal(float(target[0]), float(target[1]), 'frontier')
+
+    def _cell(self, target):
+        res = self.info.resolution
+        j = int((target[1] - self.info.origin.position.y) / res)
+        i = int((target[0] - self.info.origin.position.x) / res)
+        h, w = self.grid.shape
+        return min(max(j, 0), h - 1), min(max(i, 0), w - 1)
+
+    def sector_cost(self, wx):
+        """Extra cost (m) of a frontier outside this robot's strip of the building."""
+        if self.team_size < 2:
+            return 0.0
+        x0, _, x1, _ = self.rect
+        width = (x1 - x0) / self.team_size
+        lo = x0 + self.robot_index * width
+        hi = lo + width
+        out = max(lo - wx, wx - hi, 0.0)
+        return self.sector_penalty + 0.5 * out if out > 0 else 0.0
 
     def team_frontiers(self, reach, res, ox, oy):
         """Coarse cells inside the building nobody explored, next to cells someone did,
@@ -557,7 +601,15 @@ class Explorer(Node):
         by = (-math.sin(yaw) * dx + math.cos(yaw) * dy) / n
         self.cancel_goal()
         cmd = Twist()
-        cmd.linear.x, cmd.linear.y = speed * bx, speed * by
+        if self.holonomic:
+            cmd.linear.x, cmd.linear.y = speed * bx, speed * by
+        else:
+            # Drive out nose or tail first, whichever points closer to the escape direction,
+            # turning that end towards it.
+            ahead = bx >= 0
+            err = math.atan2(by, bx) if ahead else math.atan2(-by, -bx)
+            cmd.linear.x = speed if ahead else -speed
+            cmd.angular.z = max(-1.0, min(1.0, 1.5 * err))
         self.escape_cmd = cmd
         self.escape_until = self.now() + seconds
         self.get_logger().warn('goals keep failing here: stepping away from the obstacles')
@@ -573,19 +625,22 @@ class Explorer(Node):
             return
         self.pub_cmd.publish(self.escape_cmd)
 
+    def nav2_tick(self):
+        if not self.nav2.active():
+            self.nav2.tick(self.wall_clock.now().nanoseconds * 1e-9)
+            if self.nav2.active():
+                self.get_logger().info('Nav2 is up')
+
     def restart_nav2(self):
-        """Reset then start Nav2's lifecycle nodes (at most once every 30 s)."""
-        if self.now() - self.nav2_restart_at < 30.0 or not self.nav2_manager.service_is_ready():
+        """Nav2 isn't taking goals: read every node's state again and bring up whatever
+        isn't active (at most once every 30 s)."""
+        if self.now() - self.nav2_restart_at < 30.0:
             return
         self.nav2_restart_at = self.now()
         self.rejections = 0
         self.message = 'restarting Nav2'
-        self.get_logger().warn('Nav2 is not taking goals: resetting and starting its lifecycle nodes')
-
-        def startup(_future):
-            self.nav2_manager.call_async(ManageLifecycleNodes.Request(command=ManageLifecycleNodes.Request.STARTUP))
-        self.nav2_manager.call_async(ManageLifecycleNodes.Request(
-            command=ManageLifecycleNodes.Request.RESET)).add_done_callback(startup)
+        self.get_logger().warn(f'Nav2 is not taking goals ({self.nav2.summary()}): bringing it up again')
+        self.nav2.refresh()
 
     def cancel_goal(self):
         self.deferred = None

@@ -32,20 +32,21 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from rescue_bringup import rviz_config
+from rescue_navigation.robot_profiles import DEFAULT, profile
 from rescue_world.generate import DEFAULT_OUT, generate_from_launch
 
 
-def _robot(ns, spawn, description, slam, odom_drift):
+def _robot(ns, spawn, description, slam, odom_drift, prof):
     sim_time = {'use_sim_time': True}
     actions = [
         Node(package='robot_state_publisher', executable='robot_state_publisher', namespace=ns,
              parameters=[{'robot_description': description, 'frame_prefix': f'{ns}/', **sim_time}]),
         Node(package='ros_gz_sim', executable='create', output='screen',
              arguments=['-name', ns, '-topic', f'/{ns}/robot_description',
-                        '-x', str(spawn['x']), '-y', str(spawn['y']), '-z', '0.25',
+                        '-x', str(spawn['x']), '-y', str(spawn['y']), '-z', str(prof['spawn_z']),
                         '-Y', str(spawn['yaw'])]),
         Node(package='rescue_hexabot', executable='hexabot_odom', namespace=ns,
-             parameters=[{'body_height': 0.15, 'drift': odom_drift, **sim_time}]),
+             parameters=[{'body_height': prof['body_height'], 'drift': odom_drift, **sim_time}]),
         Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
              name='cloud_to_scan', namespace=ns,
              remappings=[('cloud_in', 'lidar/points'), ('scan', 'scan')],
@@ -71,8 +72,9 @@ def _robot(ns, spawn, description, slam, odom_drift):
     return actions
 
 
-def _bridge_topics(ns):
-    return [
+def _bridge_topics(ns, prof):
+    stance = [f'/{ns}/stance@std_msgs/msg/Float64]ignition.msgs.Double'] if prof.get('stance_topic') else []
+    return stance + [
         f'/{ns}/cmd_vel@geometry_msgs/msg/Twist]ignition.msgs.Twist',
         f'/{ns}/terrain_ahead@std_msgs/msg/Float32]ignition.msgs.Float',
         f'/{ns}/ground_truth/odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry',
@@ -106,15 +108,15 @@ def _setup(context):
     stop_gz = RegisterEventHandler(OnShutdown(on_shutdown=[ExecuteProcess(
         cmd=['pkill', '-INT', '-f', f'gazebo -r .*{paths["sdf"]}'], output='log')]))
 
-    xacro_file = os.path.join(get_package_share_directory('rescue_description'),
-                              'urdf', 'hexabot.urdf.xacro')
+    prof = profile(arg('robot'))
+    xacro_file = os.path.join(get_package_share_directory('rescue_description'), 'urdf', prof['xacro'])
     namespaces = [f'r{k + 1}' for k in range(n)]
     actions = [gz, stop_gz]
     bridge_args = ['/clock@rosgraph_msgs/msg/Clock[ignition.msgs.Clock']
     for k, ns in enumerate(namespaces):
         description = xacro.process_file(xacro_file, mappings={'ns': ns}).toxml()
-        actions += _robot(ns, gt['spawns'][k], description, slam, drift)
-        bridge_args += _bridge_topics(ns)
+        actions += _robot(ns, gt['spawns'][k], description, slam, drift, prof)
+        bridge_args += _bridge_topics(ns, prof)
 
     actions.append(Node(package='ros_gz_bridge', executable='parameter_bridge', name='gz_bridge',
                         arguments=bridge_args, parameters=[{'use_sim_time': True}], output='screen'))
@@ -144,6 +146,10 @@ def _clean_env():
     # runs on this machine, so keep it on loopback (unless the user chose otherwise).
     if 'IGN_IP' not in os.environ:
         actions.append(SetEnvironmentVariable('IGN_IP', '127.0.0.1'))
+    # FastDDS without shared memory (see config/fastdds_udp.xml), unless the user set a profile.
+    if 'FASTRTPS_DEFAULT_PROFILES_FILE' not in os.environ:
+        actions.append(SetEnvironmentVariable('FASTRTPS_DEFAULT_PROFILES_FILE', os.path.join(
+            get_package_share_directory('rescue_bringup'), 'config', 'fastdds_udp.xml')))
     # A terminal inside snap-packaged VS Code leaks the snap's GTK paths, and RViz then
     # loads the snap's libpthread and dies ("undefined symbol: __libc_pthread_init").
     if os.environ.get('SNAP_NAME') == 'code':
@@ -163,6 +169,7 @@ def generate_launch_description():
         DeclareLaunchArgument('victims_file', default_value='',
                               description='JSON list of {x, y, posture, buried, yaw}: your own victims'),
         DeclareLaunchArgument('num_robots', default_value='1'),
+        DeclareLaunchArgument('robot', default_value=DEFAULT, description='rover | hexapod | wheelleg'),
         DeclareLaunchArgument('gui', default_value='true', description='Gazebo GUI'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('slam', default_value='false',

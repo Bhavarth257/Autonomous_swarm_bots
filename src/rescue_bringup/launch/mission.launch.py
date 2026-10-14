@@ -16,7 +16,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, OpaqueFunction,
-                            RegisterEventHandler)
+                            RegisterEventHandler, SetEnvironmentVariable)
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -24,12 +24,14 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 from rescue_navigation.launch_helpers import robot_autonomy
+from rescue_navigation.robot_profiles import DEFAULT, profile
 from rescue_world.generate import generate_from_launch
 
 
 def _autonomy(context):
     arg = lambda name: LaunchConfiguration(name).perform(context)  # noqa: E731
     seed, n = int(arg('seed')), int(arg('num_robots'))
+    prof = profile(arg('robot'))
     # Same seed -> same files the sim launch generated; we only need the ground plan
     # the rescuers would have: the building outline and where the robots start.
     paths = generate_from_launch(seed, n, int(arg('grid')), arg('difficulty'), arg('victims_file'))
@@ -44,8 +46,9 @@ def _autonomy(context):
         start = (sp['x'], sp['y'], sp['yaw'])
         actions += robot_autonomy(sp['name'], rect, start,
                                   auto_start=arg('auto_start') == 'true',
-                                  time_limit=float(arg('time_limit')), startup_delay=5.0 + 4.0 * k,
-                                  robot_starts=[(gt['spawns'][j]['x'], gt['spawns'][j]['y']) for j in range(n)])
+                                  time_limit=float(arg('time_limit')), startup_delay=6.0 + 5.0 * k,
+                                  robot_starts=[(gt['spawns'][j]['x'], gt['spawns'][j]['y']) for j in range(n)],
+                                  robot=arg('robot'), team_size=n)
         if arg('swarm') == 'true':
             actions.append(Node(package='rescue_swarm', executable='swarm_agent', namespace=sp['name'],
                                 output='log', parameters=[{'building_rect': list(rect),
@@ -60,7 +63,10 @@ def _autonomy(context):
                  for v in (gt['spawns'][k]['x'], gt['spawns'][k]['y'], gt['spawns'][k]['yaw'])]
         actions.append(Node(package='rescue_perception', executable='victim_detector', output='screen',
                             parameters=[{'robots': names, 'maps_in_world': poses,
-                                         'building_rect': list(rect), **sim}]))
+                                         'building_rect': list(rect),
+                                         'body_height': float(prof['body_height']),
+                                         'teammate_radius': float(prof['teammate_radius']),
+                                         'robot_exclusion': float(prof['teammate_radius']) + 0.4, **sim}]))
     if arg('evaluate') == 'true':
         out = os.path.expanduser(f"~/rescue_reports/seed{seed}_{n}robots")
         ev = Node(package='rescue_eval', executable='evaluate', output='screen',
@@ -84,19 +90,25 @@ def generate_launch_description():
         launch_arguments={'seed': LaunchConfiguration('seed'),
                           'odom_drift': LaunchConfiguration('odom_drift'),
                           'num_robots': LaunchConfiguration('num_robots'),
+                          'robot': LaunchConfiguration('robot'),
                           'grid': LaunchConfiguration('grid'),
                           'difficulty': LaunchConfiguration('difficulty'),
                           'victims_file': LaunchConfiguration('victims_file'),
                           'gui': LaunchConfiguration('gui'),
                           'rviz': LaunchConfiguration('rviz'),
                           'slam': 'true'}.items())
-    return LaunchDescription([
+    # FastDDS without shared memory for every node here (see config/fastdds_udp.xml).
+    env = [] if 'FASTRTPS_DEFAULT_PROFILES_FILE' in os.environ else [SetEnvironmentVariable(
+        'FASTRTPS_DEFAULT_PROFILES_FILE',
+        os.path.join(get_package_share_directory('rescue_bringup'), 'config', 'fastdds_udp.xml'))]
+    return LaunchDescription(env + [
         DeclareLaunchArgument('seed', default_value='0'),
         DeclareLaunchArgument('grid', default_value='4', description='rooms per side (4 -> 4x4)'),
         DeclareLaunchArgument('difficulty', default_value='normal', description='normal | hard'),
         DeclareLaunchArgument('victims_file', default_value='',
                               description='JSON list of {x, y, posture, buried, yaw}: your own victims'),
         DeclareLaunchArgument('num_robots', default_value='1'),
+        DeclareLaunchArgument('robot', default_value=DEFAULT, description='rover | hexapod | wheelleg'),
         DeclareLaunchArgument('gui', default_value='true'),
         DeclareLaunchArgument('rviz', default_value='true'),
         DeclareLaunchArgument('auto_start', default_value='false'),
@@ -109,8 +121,8 @@ def generate_launch_description():
                               description='score against ground truth, then shut down (batch runs)'),
         DeclareLaunchArgument('perception', default_value='true', description='victim detector'),
         DeclareLaunchArgument('swarm', default_value='true', description='radio + swarm agents'),
-        DeclareLaunchArgument('radio_range', default_value='12.0', description='line-of-sight range, m'),
-        DeclareLaunchArgument('radio_wall_range', default_value='4.0', description='range through walls, m'),
+        DeclareLaunchArgument('radio_range', default_value='25.0', description='line-of-sight range, m'),
+        DeclareLaunchArgument('radio_wall_range', default_value='8.0', description='range through walls, m'),
         sim,
         OpaqueFunction(function=_autonomy),
     ])

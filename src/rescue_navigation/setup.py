@@ -21,6 +21,8 @@ setup(
         'console_scripts': [
             'traversability = rescue_navigation.traversability:main',
             'explorer = rescue_navigation.explorer:main',
+            'teleop = rescue_navigation.wasd_teleop:main',
+            'wasd_teleop = rescue_navigation.wasd_teleop:main',
         ],
     },
 )

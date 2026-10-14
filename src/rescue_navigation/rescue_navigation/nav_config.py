@@ -10,9 +10,44 @@ import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
 
-ROBOT_RADIUS = 0.22      # collision radius: the legs (span ~0.53 x 0.58 m) may brush door jambs
-INFLATION = 0.7          # paths keep well clear of walls anyway
-CRUISE = 0.35            # m/s, below the gait's 0.45 cap so turns stay smooth
+from rescue_navigation.robot_profiles import DEFAULT, profile
+
+
+
+# Nav2's default tree, with quick recoveries: its 1.57 rad spin fails in a doorway (the
+# legs touch the jambs), and backing up 0.3 m at 0.05 m/s plus a 5 s wait stood a robot
+# still for 10-15 s at every narrow door. Three retries, not six: an unreachable frontier
+# should fail fast; the explorer then blacklists it and picks another.
+BT_XML = """<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="3" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <BackUp backup_dist="0.20" backup_speed="0.15"/>
+          <Wait wait_duration="1"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>
+"""
 
 
 def _load(pkg, *path):
@@ -44,13 +79,16 @@ def slam_params(ns):
     return {ns: {'slam_toolbox': {'ros__parameters': p}}}
 
 
-def nav2_params(ns):
+def nav2_params(ns, bt_xml=None, robot=DEFAULT):
+    prof = profile(robot)
     d = _load('nav2_bringup', 'params', 'nav2_params.yaml')
     map_frame, odom_frame, base = f'{ns}/map', f'{ns}/odom', f'{ns}/base_footprint'
     nav_map = f'/{ns}/nav_map'
 
     bt = d['bt_navigator']['ros__parameters']
     bt.update({'global_frame': map_frame, 'robot_base_frame': base, 'odom_topic': f'/{ns}/odom'})
+    if bt_xml:
+        bt['default_nav_to_pose_bt_xml'] = bt_xml
 
     ctrl = d['controller_server']['ros__parameters']
     ctrl['controller_frequency'] = 20.0
@@ -58,22 +96,27 @@ def nav2_params(ns):
     ctrl['general_goal_checker'].update({'xy_goal_tolerance': 0.35, 'yaw_goal_tolerance': 6.28})
     ctrl['FollowPath'] = {
         'plugin': 'nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController',
-        'desired_linear_vel': CRUISE,
-        'lookahead_dist': 0.8, 'min_lookahead_dist': 0.45, 'max_lookahead_dist': 1.0,
-        'lookahead_time': 1.5, 'use_velocity_scaled_lookahead_dist': False,
-        'rotate_to_heading_angular_vel': 0.8, 'use_rotate_to_heading': True,
-        'rotate_to_heading_min_angle': 1.0, 'max_angular_accel': 1.5,
+        'desired_linear_vel': prof['cruise'],
+        # Short look-ahead in doorways: a long one cuts the corner, the collision check
+        # then sees the jamb ahead and stops the robot.
+        'lookahead_dist': 0.6, 'min_lookahead_dist': 0.4, 'max_lookahead_dist': 0.9,
+        'lookahead_time': 1.5, 'use_velocity_scaled_lookahead_dist': True,
+        'rotate_to_heading_angular_vel': prof['rotate_vel'], 'use_rotate_to_heading': True,
+        'rotate_to_heading_min_angle': 1.0, 'max_angular_accel': 3.0,
         'allow_reversing': False, 'transform_tolerance': 0.3,
         'min_approach_linear_velocity': 0.08, 'approach_velocity_scaling_dist': 0.5,
         'use_regulated_linear_velocity_scaling': True,
-        'regulated_linear_scaling_min_radius': 0.9, 'regulated_linear_scaling_min_speed': 0.2,
+        'regulated_linear_scaling_min_radius': 0.9, 'regulated_linear_scaling_min_speed': prof['min_speed'],
         'use_cost_regulated_linear_velocity_scaling': True,
         'cost_scaling_dist': 0.5, 'cost_scaling_gain': 1.0, 'inflation_cost_scaling_factor': 3.5,
-        'use_collision_detection': True, 'max_allowed_time_to_collision_up_to_carrot': 1.0,
+        # With a rectangular footprint (rover) this check stops the robot whenever its outline
+        # touches the inflated band around a wall, i.e. in every doorway and tight room (~40 %
+        # of control cycles); the planner already keeps the whole outline clear.
+        'use_collision_detection': prof['footprint'] is None, 'max_allowed_time_to_collision_up_to_carrot': 1.0,
     }
 
     inflation = {'plugin': 'nav2_costmap_2d::InflationLayer',
-                 'cost_scaling_factor': 3.5, 'inflation_radius': INFLATION}
+                 'cost_scaling_factor': 3.5, 'inflation_radius': prof['inflation']}
     static = {'plugin': 'nav2_costmap_2d::StaticLayer', 'map_topic': nav_map,
               'map_subscribe_transient_local': True, 'trinary_costmap': False,
               'subscribe_to_updates': False}
@@ -90,14 +133,16 @@ def nav2_params(ns):
     lc = d['local_costmap']['local_costmap']['ros__parameters']
     for k in ('voxel_layer', 'static_layer'):
         lc.pop(k, None)
-    lc.update({'global_frame': odom_frame, 'robot_base_frame': base, 'robot_radius': ROBOT_RADIUS,
+    # A rectangle for the rover, a circle for the hexapod's leg span.
+    body = ({'footprint': str(prof['footprint'])} if prof['footprint'] else {'robot_radius': prof['robot_radius']})
+    lc.update({'global_frame': odom_frame, 'robot_base_frame': base, **body,
                'width': 4, 'height': 4, 'update_frequency': 5.0,
                'plugins': ['static_layer', 'obstacle_layer', 'inflation_layer'],
                'static_layer': static, 'obstacle_layer': scan_layer(3.0),
                'inflation_layer': inflation})
 
     gc = d['global_costmap']['global_costmap']['ros__parameters']
-    gc.update({'global_frame': map_frame, 'robot_base_frame': base, 'robot_radius': ROBOT_RADIUS,
+    gc.update({'global_frame': map_frame, 'robot_base_frame': base, **body,
                'track_unknown_space': True, 'update_frequency': 1.0,
                'plugins': ['static_layer', 'obstacle_layer', 'inflation_layer'],
                'static_layer': static, 'obstacle_layer': scan_layer(5.0),
@@ -108,14 +153,14 @@ def nav2_params(ns):
 
     beh = d['behavior_server']['ros__parameters']
     beh.update({'global_frame': odom_frame, 'robot_base_frame': base,
-                'max_rotational_vel': 0.8, 'min_rotational_vel': 0.3, 'rotational_acc_lim': 2.0})
+                'max_rotational_vel': prof['rotate_vel'], 'min_rotational_vel': 0.4, 'rotational_acc_lim': 3.0})
 
     # Smooth the controller's output (acceleration / deceleration limits) so the gait never
     # sees a stop-go command stream.
     d['velocity_smoother']['ros__parameters'].update({
         'smoothing_frequency': 20.0, 'scale_velocities': False, 'feedback': 'OPEN_LOOP',
-        'max_velocity': [0.45, 0.25, 1.0], 'min_velocity': [-0.3, -0.25, -1.0],
-        'max_accel': [0.5, 0.5, 1.5], 'max_decel': [-0.8, -0.8, -2.0],
+        'max_velocity': prof['max_vel'], 'min_velocity': [-0.3, -prof['max_vel'][1], -prof['max_vel'][2]],
+        'max_accel': [0.5, 0.5, 3.0], 'max_decel': [-0.8, -0.8, -4.0],
         'odom_topic': f'/{ns}/odom', 'odom_duration': 0.1, 'deadband_velocity': [0.0, 0.0, 0.0],
         'velocity_timeout': 1.0})
 
@@ -136,11 +181,13 @@ def _set_sim_time(d):
             _set_sim_time(v)
 
 
-def write(ns, out_dir):
+def write(ns, out_dir, robot=DEFAULT):
     os.makedirs(out_dir, exist_ok=True)
-    paths = {}
-    for name, fn in (('slam', slam_params), ('nav2', nav2_params)):
+    paths = {'bt': os.path.join(out_dir, 'navigate_to_pose_quick_recovery.xml')}
+    with open(paths['bt'], 'w') as f:
+        f.write(BT_XML)
+    for name, data in (('slam', slam_params(ns)), ('nav2', nav2_params(ns, paths['bt'], robot))):
         paths[name] = os.path.join(out_dir, f'{ns}_{name}.yaml')
         with open(paths[name], 'w') as f:
-            yaml.safe_dump(fn(ns), f, sort_keys=False)
+            yaml.safe_dump(data, f, sort_keys=False)
     return paths

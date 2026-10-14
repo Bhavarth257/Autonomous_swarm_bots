@@ -1,0 +1,209 @@
+<?xml version="1.0"?>
+<!--
+  Wheel-legged search robot with an active rocker suspension (after the robot in
+  "Lateral Stability of a Mobile Robot Utilizing an Active Suspension", MDPI).
+
+  Each side has one ROCKER: a front leg and a rear leg forming a V, hinged on the green
+  hub under the middle of the body. The hub joint (l/r_rocker_joint) turns freely, so
+  on rough ground the front wheel can rise while the rear one drops and all four wheels
+  stay down; the two rockers are linked like a rover's differential bar (the body sits
+  at their average pitch). One motor per side opens or closes that side's V (both legs
+  together): open = low and wide (photo a), closed = tall (photo b); opening one side
+  more than the other keeps the body level across a slope (photo c).
+
+  Everything is driven by the RescueWheelLegDrive plugin (rescue_hexabot):
+    /<ns>/cmd_vel  geometry_msgs/Twist   skid steering
+    /<ns>/stance   std_msgs/Float64      V half-angle, rad (0 = legs straight down)
+  It also turns the wheels to match the legs' motion (otherwise the tyres pin the feet
+  and the legs can't move), applies the differential and levels the body from its roll.
+
+  base_link is the body centre, ~0.49 m above the ground at the default 0.5 rad stance.
+  Skid steering only turns while the wheelbase is no longer than the track (0.48 m):
+  above ~0.65 rad (wide stance) it drives straight but can't turn on the spot.
+-->
+<robot name="wheelleg" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="ns" default="r1"/>
+  <xacro:arg name="sensors" default="true"/>
+  <xacro:arg name="stance" default="0.5"/>
+  <xacro:property name="ns" value="$(arg ns)"/>
+
+  <xacro:property name="body_l" value="0.54"/>         <!-- straight section; ends are rounded -->
+  <xacro:property name="body_w" value="0.30"/>
+  <xacro:property name="body_h" value="0.12"/>
+  <xacro:property name="hub_y" value="0.18"/>
+  <xacro:property name="hub_z" value="-0.04"/>
+  <xacro:property name="leg_l" value="0.36"/>
+  <xacro:property name="wheel_r" value="0.14"/>
+  <xacro:property name="wheel_w" value="0.08"/>
+  <xacro:property name="wheel_y" value="0.06"/>         <!-- wheel centre outboard of its leg -->
+
+  <material name="red"><color rgba="0.86 0.06 0.05 1"/></material>
+  <material name="dark"><color rgba="0.08 0.08 0.09 1"/></material>
+  <material name="rubber"><color rgba="0.03 0.03 0.03 1"/></material>
+  <material name="hub"><color rgba="0.9 0.08 0.08 1"/></material>
+  <material name="green"><color rgba="0.2 0.75 0.25 1"/></material>
+  <material name="blue"><color rgba="0.2 0.55 0.95 1"/></material>
+  <material name="metal"><color rgba="0.7 0.7 0.72 1"/></material>
+  <material name="eye"><color rgba="0.15 0.35 0.95 1"/></material>
+
+  <xacro:macro name="box_inertia" params="m x y z *origin">
+    <inertial><xacro:insert_block name="origin"/><mass value="${m}"/>
+      <inertia ixx="${m*(y*y+z*z)/12}" iyy="${m*(x*x+z*z)/12}" izz="${m*(x*x+y*y)/12}" ixy="0" ixz="0" iyz="0"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- ===== body ===== -->
+  <link name="base_link">
+    <visual><geometry><box size="${body_l} ${body_w} ${body_h}"/></geometry><material name="red"/></visual>
+    <visual><origin xyz="${body_l/2} 0 0" rpy="${pi/2} 0 0"/><geometry><cylinder radius="${body_h/2}" length="${body_w - 0.006}"/></geometry><material name="red"/></visual>
+    <visual><origin xyz="${-body_l/2} 0 0" rpy="${pi/2} 0 0"/><geometry><cylinder radius="${body_h/2}" length="${body_w - 0.006}"/></geometry><material name="red"/></visual>
+    <!-- black top panel, sloping down at the front like the picture -->
+    <visual><origin xyz="-0.04 0 ${body_h/2 + 0.012}"/><geometry><box size="${body_l - 0.12} ${body_w - 0.04} 0.024"/></geometry><material name="dark"/></visual>
+    <visual><origin xyz="${body_l/2 - 0.08} 0 ${body_h/2 + 0.004}" rpy="0 0.25 0"/><geometry><box size="0.12 ${body_w - 0.04} 0.012"/></geometry><material name="dark"/></visual>
+    <!-- differential bar across the underside, linking the two rocker hubs (photo c) -->
+    <visual><origin xyz="0 0 ${hub_z}" rpy="${pi/2} 0 0"/><geometry><cylinder radius="0.012" length="${2*hub_y - 0.06}"/></geometry><material name="blue"/></visual>
+    <!-- stance actuators: blue rods from each hub back along the body (photo a) -->
+    <visual><origin xyz="-0.13 ${hub_y - 0.035} ${hub_z + 0.01}"/><geometry><box size="0.24 0.02 0.02"/></geometry><material name="blue"/></visual>
+    <visual><origin xyz="-0.13 ${-hub_y + 0.035} ${hub_z + 0.01}"/><geometry><box size="0.24 0.02 0.02"/></geometry><material name="blue"/></visual>
+    <collision><geometry><box size="${body_l + body_h} ${body_w} ${body_h}"/></geometry></collision>
+    <xacro:box_inertia m="8.0" x="${body_l + body_h}" y="${body_w}" z="${body_h}"><origin xyz="0 0 -0.01"/></xacro:box_inertia>
+  </link>
+  <gazebo reference="base_link"><mu1>0.4</mu1><mu2>0.4</mu2></gazebo>
+
+  <!-- ===== rockers, legs, wheels ===== -->
+  <xacro:macro name="wheel" params="name side">
+    <link name="${name}_wheel">
+      <visual><origin rpy="${pi/2} 0 0"/><geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry><material name="rubber"/></visual>
+      <visual><origin xyz="0 ${side*(wheel_w/2 + 0.002)} 0" rpy="${pi/2} 0 0"/><geometry><cylinder radius="${wheel_r*0.42}" length="0.006"/></geometry><material name="hub"/></visual>
+      <visual><origin xyz="0 ${side*(wheel_w/2 + 0.006)} 0" rpy="${pi/2} 0 0"/><geometry><cylinder radius="${wheel_r*0.12}" length="0.006"/></geometry><material name="metal"/></visual>
+      <collision><origin rpy="${pi/2} 0 0"/><geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry></collision>
+      <!-- iyy includes the geared motor's reflected inertia (far more than the tyre's own);
+           ixx/izz raised with it so the inertia stays physically valid (Gazebo rejects it otherwise) -->
+      <inertial><mass value="0.8"/>
+        <inertia ixx="0.025" iyy="0.04" izz="0.025" ixy="0" ixz="0" iyz="0"/></inertial>
+    </link>
+    <gazebo reference="${name}_wheel"><mu1>1.5</mu1><mu2>1.5</mu2></gazebo>
+  </xacro:macro>
+
+  <!-- leg: dir +1 front (swings forward as its angle grows), -1 rear -->
+  <xacro:macro name="leg" params="side_name end dir side">
+    <link name="${side_name}${end}_leg">
+      <visual><origin xyz="0 0 ${-leg_l/2}"/><geometry><box size="0.06 0.04 ${leg_l}"/></geometry><material name="red"/></visual>
+      <collision><origin xyz="0 0 ${-leg_l/2}"/><geometry><box size="0.06 0.04 ${leg_l}"/></geometry></collision>
+      <xacro:box_inertia m="0.6" x="0.06" y="0.04" z="${leg_l}"><origin xyz="0 0 ${-leg_l/2}"/></xacro:box_inertia>
+    </link>
+    <joint name="${side_name}${end}_leg_joint" type="revolute">
+      <parent link="${side_name}_rocker"/><child link="${side_name}${end}_leg"/>
+      <axis xyz="0 ${-dir} 0"/>
+      <!-- 0 (straight down) inside the limits: a joint that starts outside them stays locked -->
+      <limit lower="-0.2" upper="1.3" effort="120" velocity="3"/>
+    </joint>
+    <xacro:wheel name="${side_name}${end}" side="${side}"/>
+    <joint name="${side_name}${end}_wheel_joint" type="continuous">
+      <parent link="${side_name}${end}_leg"/><child link="${side_name}${end}_wheel"/>
+      <origin xyz="0 ${side*wheel_y} ${-leg_l}"/><axis xyz="0 1 0"/>
+      <limit effort="60" velocity="14"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:macro name="rocker" params="side_name side">
+    <!-- the green hub: the left one turns freely; the plugin makes the right one mirror it
+         (a differential), which is how both turn on rough ground -->
+    <link name="${side_name}_rocker">
+      <visual><origin rpy="${pi/2} 0 0"/><geometry><cylinder radius="0.045" length="0.06"/></geometry><material name="green"/></visual>
+      <collision><origin rpy="${pi/2} 0 0"/><geometry><cylinder radius="0.04" length="0.05"/></geometry></collision>
+      <xacro:box_inertia m="0.5" x="0.09" y="0.06" z="0.09"><origin xyz="0 0 0"/></xacro:box_inertia>
+    </link>
+    <joint name="${side_name}_rocker_joint" type="revolute">
+      <parent link="base_link"/><child link="${side_name}_rocker"/>
+      <origin xyz="0 ${side*hub_y} ${hub_z}"/><axis xyz="0 1 0"/>
+      <limit lower="-0.15" upper="0.15" effort="80" velocity="5"/>
+      <dynamics damping="5.0"/>
+    </joint>
+    <xacro:leg side_name="${side_name}" end="f" dir="1" side="${side}"/>
+    <xacro:leg side_name="${side_name}" end="r" dir="-1" side="${side}"/>
+  </xacro:macro>
+  <xacro:rocker side_name="l" side="1"/>
+  <xacro:rocker side_name="r" side="-1"/>
+
+  <!-- ===== sensors ===== -->
+  <link name="lidar_link">
+    <visual><geometry><cylinder radius="0.035" length="0.045"/></geometry><material name="dark"/></visual>
+    <visual><origin xyz="0 0 0.024"/><geometry><cylinder radius="0.03" length="0.004"/></geometry><material name="red"/></visual>
+    <collision><geometry><cylinder radius="0.035" length="0.045"/></geometry></collision>
+    <xacro:box_inertia m="0.2" x="0.07" y="0.07" z="0.045"><origin xyz="0 0 0"/></xacro:box_inertia>
+  </link>
+  <joint name="lidar_joint" type="fixed">
+    <parent link="base_link"/><child link="lidar_link"/>
+    <origin xyz="0.0 0 ${body_h/2 + 0.05}"/>
+  </joint>
+
+  <!-- camera head with its lights at the front, like the black boxes with red lamps on top -->
+  <link name="camera_link">
+    <visual><geometry><box size="0.07 0.12 0.06"/></geometry><material name="dark"/></visual>
+    <visual><origin xyz="0.036 0.03 0" rpy="0 ${pi/2} 0"/><geometry><cylinder radius="0.016" length="0.004"/></geometry><material name="eye"/></visual>
+    <visual><origin xyz="0.036 -0.03 0" rpy="0 ${pi/2} 0"/><geometry><cylinder radius="0.016" length="0.004"/></geometry><material name="metal"/></visual>
+    <visual><origin xyz="0 0 0.045"/><geometry><cylinder radius="0.015" length="0.03"/></geometry><material name="red"/></visual>
+    <visual><origin xyz="0 0 -0.06"/><geometry><cylinder radius="0.012" length="0.06"/></geometry><material name="metal"/></visual>
+    <collision><geometry><box size="0.07 0.12 0.06"/></geometry></collision>
+    <xacro:box_inertia m="0.3" x="0.07" y="0.12" z="0.06"><origin xyz="0 0 0"/></xacro:box_inertia>
+  </link>
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/><child link="camera_link"/>
+    <origin xyz="${body_l/2 - 0.06} 0 ${body_h/2 + 0.12}" rpy="0 0.15 0"/>
+  </joint>
+  <link name="camera_optical_frame"/>
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera_link"/><child link="camera_optical_frame"/>
+    <origin rpy="${-pi/2} 0 ${-pi/2}"/>
+  </joint>
+
+  <!-- rear beacon and antenna -->
+  <link name="beacon_link">
+    <visual><geometry><box size="0.06 0.08 0.05"/></geometry><material name="dark"/></visual>
+    <visual><origin xyz="0 0 0.04"/><geometry><cylinder radius="0.015" length="0.03"/></geometry><material name="red"/></visual>
+    <visual><origin xyz="0 0.03 0.08"/><geometry><cylinder radius="0.004" length="0.12"/></geometry><material name="metal"/></visual>
+  </link>
+  <joint name="beacon_joint" type="fixed">
+    <parent link="base_link"/><child link="beacon_link"/>
+    <origin xyz="${-body_l/2 + 0.08} 0 ${body_h/2 + 0.05}"/>
+  </joint>
+
+  <link name="imu_link"/>
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/><child link="imu_link"/>
+  </joint>
+
+  <xacro:include filename="$(find rescue_description)/urdf/sensors.xacro"/>
+  <xacro:if value="$(arg sensors)">
+    <xacro:rescue_sensors ns="${ns}"/>
+  </xacro:if>
+
+  <!-- ===== drive, suspension, levelling ===== -->
+  <gazebo>
+    <plugin filename="RescueWheelLegDrive" name="rescue_hexabot::WheelLegDrive">
+      <cmd_vel_topic>/${ns}/cmd_vel</cmd_vel_topic>
+      <stance_topic>/${ns}/stance</stance_topic>
+      <body_link>base_link</body_link>
+      <leg_length>${leg_l}</leg_length>
+      <wheel_radius>${wheel_r}</wheel_radius>
+      <track>${2*(hub_y + wheel_y)}</track>
+      <stance>$(arg stance)</stance>
+      <stance_min>0.25</stance_min>
+      <stance_max>1.15</stance_max>
+      <leg_gain>6.0</leg_gain>
+      <leg_max_rate>1.2</leg_max_rate>
+      <diff_gain>8.0</diff_gain>
+      <rocker_free>0.15</rocker_free>
+      <rocker_turn>0.12</rocker_turn>
+      <level_gain>1.5</level_gain>
+      <level_limit>0.4</level_limit>
+      <max_speed>0.9</max_speed>
+      <max_turn>2.0</max_turn>
+      <accel>1.2</accel>
+      <turn_accel>4.0</turn_accel>
+      <cmd_timeout>0.5</cmd_timeout>
+    </plugin>
+  </gazebo>
+  <xacro:ground_truth_odom ns="${ns}"/>
+</robot>

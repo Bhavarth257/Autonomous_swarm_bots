@@ -56,3 +56,23 @@ def test_reachable_through_door_only():
     assert r[10, 10] and not r[35, 7]
     # Start brushing the wall (inside the grown obstacle): snaps to the nearest open cell.
     assert gu.reachable(g, (19, 10), radius_cells=2)[10, 10]
+
+
+def test_path_distance_goes_around_walls():
+    free = np.ones((200, 200), dtype=bool)
+    free[95:105, :170] = False                  # a (robot-grown) wall with a gap on the right
+    d = gu.path_distance(free, (80, 20), 0.05)
+    assert abs(d[80, 40] - 1.0) < 0.21           # open floor: about the straight line
+    assert d[120, 20] > 12.0                     # 1 m away through the wall, ~15 m around it
+    assert np.isinf(gu.path_distance(np.zeros((10, 10), dtype=bool), (5, 5), 0.05)[0, 0])
+
+
+def test_sector_cost_splits_building_in_strips():
+    import types
+    from rescue_navigation.explorer import Explorer
+    e = types.SimpleNamespace(team_size=3, robot_index=0, rect=[0.0, 0.0, 24.0, 20.0], sector_penalty=5.0)
+    cost = lambda x: Explorer.sector_cost(e, x)       # noqa: E731
+    assert cost(4.0) == 0.0                           # r1 owns x 0-8
+    assert cost(10.0) == 5.0 + 0.5 * 2.0              # 2 m into r2's strip
+    e.robot_index = 2
+    assert cost(20.0) == 0.0 and cost(4.0) > 5.0

@@ -23,6 +23,15 @@ target_link_libraries(RescueHexWalk
   ignition-msgs8::ignition-msgs8)
 install(TARGETS RescueHexWalk LIBRARY DESTINATION lib)
 
+# Gazebo system plugin: drive, rocker differential and levelling for the wheel-legged robot.
+add_library(RescueWheelLegDrive SHARED src/WheelLegDrive.cc)
+target_link_libraries(RescueWheelLegDrive
+  ignition-gazebo6::ignition-gazebo6
+  ignition-plugin1::register
+  ignition-transport11::ignition-transport11
+  ignition-msgs8::ignition-msgs8)
+install(TARGETS RescueWheelLegDrive LIBRARY DESTINATION lib)
+
 install(PROGRAMS scripts/hexabot_odom DESTINATION lib/${PROJECT_NAME})
 
 # Sourcing the workspace puts the plugin on Gazebo's search path.

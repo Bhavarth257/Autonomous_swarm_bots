@@ -2,8 +2,11 @@
 """Legged odometry for a hexapod.
 
 A real hexapod estimates its motion from leg kinematics and an IMU: roll, pitch and
-body height are accurate, while x, y and yaw drift (foot slip, stride scale error,
-gyro bias). This node reproduces that from the simulator's ground-truth pose:
+body height are accurate; x and y come from the legs and drift (foot slip, stride
+scale error); yaw comes from the gyro, whose bias is measured while the robot stands
+still before the mission, so only a small residual bias and scale error remain
+(leg-kinematic yaw slips badly when a hexapod turns). This node reproduces that from
+the simulator's ground-truth pose:
 
   in   ground_truth/odom                       (Gazebo OdometryPublisher, 3D)
   out  odom                                    nav_msgs/Odometry, odom -> base_footprint
@@ -55,8 +58,11 @@ class HexabotOdom(Node):
         rng = random.Random(self.declare_parameter('seed', zlib.crc32(ns.encode())).value)
         # Fixed per-robot errors (calibration) plus per-step noise.
         self.scale = 1.0 + (rng.gauss(0, 0.02) if drift else 0.0)
-        self.yaw_scale = 1.0 + (rng.gauss(0, 0.015) if drift else 0.0)
-        self.gyro_bias = rng.gauss(0, math.radians(0.15)) if drift else 0.0   # rad/s
+        # Gyro after the standstill calibration: ~0.3 % scale error, ~0.02 deg/s residual
+        # bias (it was 1.5 % and 0.15 deg/s uncalibrated: 9 deg a minute, which SLAM can't
+        # correct while a robot stands still, so its map came out rotated once it moved).
+        self.yaw_scale = 1.0 + (rng.gauss(0, 0.003) if drift else 0.0)
+        self.gyro_bias = rng.gauss(0, math.radians(0.02)) if drift else 0.0   # rad/s
         self.step_noise = 0.01 if drift else 0.0     # m per m travelled
         self.rng = rng
 
