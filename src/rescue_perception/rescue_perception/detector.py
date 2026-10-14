@@ -125,6 +125,7 @@ class Detector(Node):
         self.building = list(self.declare_parameter('building_rect', [-1e9, -1e9, 1e9, 1e9]).value)
         self.robot_gap = self.declare_parameter('robot_exclusion', 0.7).value
         self.teammate_radius = self.declare_parameter('teammate_radius', 0.3).value
+        self.teammate_height = self.declare_parameter('teammate_height', 0.2).value
         self.body_height = self.declare_parameter('body_height', 0.15).value
         self.robot_world = {}         # robot -> (x, y) world, updated as frames are processed
         rate = self.declare_parameter('rate', 6.0).value
@@ -190,7 +191,7 @@ class Detector(Node):
             if vi.touches_border(c.box, shape):
                 continue          # partly out of view: its bottom edge isn't where it stands
             if c.source == 'rgb' and any(
-                    vi.box_covers(K, m_cam[0], m_cam[1], (*r.to_map(px, py), floor_z + 0.2), c.box, self.teammate_radius)
+                    vi.box_covers(K, m_cam[0], m_cam[1], (*r.to_map(px, py), floor_z + self.teammate_height), c.box, self.teammate_radius)
                     for ns, (px, py) in self.robot_world.items() if ns != r.ns):
                 continue          # a teammate: YOLO sometimes takes the black hexapod for a person
             # Distance from the box's bottom edge meeting the floor; lidar refines it when

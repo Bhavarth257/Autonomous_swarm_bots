@@ -19,7 +19,7 @@ import zlib
 
 import numpy as np
 
-from rescue_world.layout import GRID_RES, generate_layout
+from rescue_world.layout import CLIMB_MAX_H, GRID_RES, generate_layout
 from rescue_world.sdf_writer import to_sdf
 
 DEFAULT_OUT = os.path.expanduser('~/.ros/rescue_worlds')
@@ -132,10 +132,13 @@ def generate(seed=0, out_dir=DEFAULT_OUT, name=None, n_robots=3, **kw):
     return paths
 
 
-def generate_from_launch(seed, n_robots, grid=4, difficulty='normal', victims_file=''):
-    """What the launch files call: same seed and options -> same world files."""
-    return generate(seed=seed, out_dir=DEFAULT_OUT, n_robots=max(n_robots, 3), cols=grid, rows=grid,
-                    difficulty=difficulty, custom_victims=load_victims(victims_file))
+def generate_from_launch(seed, n_robots, grid=4, difficulty='normal', victims_file='', climb_max=CLIMB_MAX_H):
+    """What the launch files call: same seed and options -> same world files. A robot that
+    climbs less than the default gets its own world files (rescue_<seed>_c<cm>), so every
+    room it is sent into stays reachable for it."""
+    name = f'rescue_{seed}' if abs(climb_max - CLIMB_MAX_H) < 1e-6 else f'rescue_{seed}_c{round(climb_max * 100)}'
+    return generate(seed=seed, out_dir=DEFAULT_OUT, name=name, n_robots=max(n_robots, 3), cols=grid, rows=grid,
+                    difficulty=difficulty, custom_victims=load_victims(victims_file), climb_max=climb_max)
 
 
 def load_victims(path):

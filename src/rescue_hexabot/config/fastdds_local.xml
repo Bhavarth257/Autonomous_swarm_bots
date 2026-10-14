@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- FastDDS for this workspace: everything runs on this computer, so ROS nodes talk over
+     UDP on 127.0.0.1 only and find each other by unicast (probing up to 100 participants
+     per host), never by multicast on the network:
+       - shared memory left a node blocked on a port lock at startup now and then
+         (a planner or SLAM that never answered, a robot that never moved);
+       - on Wi-Fi networks that filter multicast, discovery failed outright (6 of ~50
+         nodes found each other).
+     Sourcing install/setup.bash sets FASTRTPS_DEFAULT_PROFILES_FILE to this file unless it
+     is already set, so separate terminals (teleop, ros2 topic ...) see the simulation too. -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>udp_local</transport_id>
+      <type>UDPv4</type>
+      <interfaceWhiteList><address>127.0.0.1</address></interfaceWhiteList>
+      <maxInitialPeersRange>100</maxInitialPeersRange>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="local_participant" is_default_profile="true">
+    <rtps>
+      <userTransports><transport_id>udp_local</transport_id></userTransports>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <builtin>
+        <initialPeersList>
+          <locator><udpv4><address>127.0.0.1</address></udpv4></locator>
+        </initialPeersList>
+      </builtin>
+    </rtps>
+  </participant>
+</profiles>

@@ -76,3 +76,17 @@ def test_sector_cost_splits_building_in_strips():
     assert cost(10.0) == 5.0 + 0.5 * 2.0              # 2 m into r2's strip
     e.robot_index = 2
     assert cost(20.0) == 0.0 and cost(4.0) > 5.0
+
+
+def test_room_cost_prefers_own_and_done_rooms():
+    import types
+    from rescue_navigation.explorer import Explorer
+    rooms = [{'key': '0,0', 'owner': 'r1', 'done': False, 'rect': [0, 0, 6, 5]},
+             {'key': '1,0', 'owner': 'r2', 'done': False, 'rect': [6, 0, 12, 5]},
+             {'key': '2,0', 'owner': 'r2', 'done': True, 'rect': [12, 0, 18, 5]}]
+    e = types.SimpleNamespace(team_rooms=rooms, sector_penalty=5.0, team_size=3,
+                              get_namespace=lambda: '/r1')
+    cost = lambda x, y: Explorer.sector_cost(e, x, y)        # noqa: E731
+    assert cost(3, 2) == 0.0           # own room
+    assert cost(8, 2) == 5.0           # r2's, still being searched
+    assert cost(14, 2) == 0.0          # r2's but done: free to help with leftovers

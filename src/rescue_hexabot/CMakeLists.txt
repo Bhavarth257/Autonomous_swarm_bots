@@ -33,8 +33,10 @@ target_link_libraries(RescueWheelLegDrive
 install(TARGETS RescueWheelLegDrive LIBRARY DESTINATION lib)
 
 install(PROGRAMS scripts/hexabot_odom DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
-# Sourcing the workspace puts the plugin on Gazebo's search path.
+# Sourcing the workspace puts the plugins on Gazebo's search path and selects the
+# localhost FastDDS profile (config/fastdds_local.xml) unless one is already set.
 ament_environment_hooks("${CMAKE_CURRENT_SOURCE_DIR}/hooks/rescue_hexabot.dsv.in")
 
 ament_package()

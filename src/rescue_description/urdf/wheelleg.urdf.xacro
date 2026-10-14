@@ -18,7 +18,7 @@
   and the legs can't move), applies the differential and levels the body from its roll.
 
   base_link is the body centre, ~0.49 m above the ground at the default 0.5 rad stance.
-  Skid steering only turns while the wheelbase is no longer than the track (0.48 m):
+  Skid steering only turns while the wheelbase is no longer than the track (0.44 m):
   above ~0.65 rad (wide stance) it drives straight but can't turn on the spot.
 -->
 <robot name="wheelleg" xmlns:xacro="http://www.ros.org/wiki/xacro">
@@ -30,12 +30,12 @@
   <xacro:property name="body_l" value="0.54"/>         <!-- straight section; ends are rounded -->
   <xacro:property name="body_w" value="0.30"/>
   <xacro:property name="body_h" value="0.12"/>
-  <xacro:property name="hub_y" value="0.18"/>
+  <xacro:property name="hub_y" value="0.165"/>
   <xacro:property name="hub_z" value="-0.04"/>
   <xacro:property name="leg_l" value="0.36"/>
   <xacro:property name="wheel_r" value="0.14"/>
   <xacro:property name="wheel_w" value="0.08"/>
-  <xacro:property name="wheel_y" value="0.06"/>         <!-- wheel centre outboard of its leg -->
+  <xacro:property name="wheel_y" value="0.055"/>        <!-- wheel centre outboard of its leg: track 0.44, width 0.52 -->
 
   <material name="red"><color rgba="0.86 0.06 0.05 1"/></material>
   <material name="dark"><color rgba="0.08 0.08 0.09 1"/></material>
@@ -194,9 +194,15 @@
       <leg_gain>6.0</leg_gain>
       <leg_max_rate>1.2</leg_max_rate>
       <diff_gain>8.0</diff_gain>
-      <rocker_free>0.15</rocker_free>
-      <rocker_turn>0.12</rocker_turn>
-      <level_gain>1.5</level_gain>
+      <climb_open>0.2</climb_open>
+      <climb_close>0.3</climb_close>
+      <climb_rate>0.5</climb_rate>
+      <push_time>1.5</push_time>
+      <stall_time>0.4</stall_time>
+      <climb_attempts>0</climb_attempts>   <!-- leg pushes off: tested, they tip the robot at the turnable stance -->
+      <tip_pitch>0.35</tip_pitch>
+      <roll_guard>0.2</roll_guard>
+      <level_gain>3.0</level_gain>
       <level_limit>0.4</level_limit>
       <max_speed>0.9</max_speed>
       <max_turn>2.0</max_turn>

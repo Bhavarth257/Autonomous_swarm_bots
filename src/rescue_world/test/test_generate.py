@@ -64,3 +64,14 @@ def test_smoke_is_invisible_to_lidar():
     ratios = [float(p.find('particle_scatter_ratio').text) for p in root.iter('plugin')
               if p.get('name') == 'ignition::gazebo::systems::ParticleEmitter']
     assert ratios and all(0 < r < 1e-4 for r in ratios)
+
+
+@pytest.mark.parametrize('seed', [2, 3, 4])
+def test_low_climbing_robot_gets_low_debris(seed):
+    # The wheel-leg robot climbs 10 cm: its worlds have no taller block or joist, and the
+    # default worlds (12 cm) are unchanged by the option.
+    low = generate_layout(seed=seed, difficulty='hard', climb_max=0.10)
+    steps = [p.size[2] for p in low.parts if p.name.startswith(('block', 'joist'))]
+    assert steps and max(steps) <= 0.10 + 1e-9
+    a, b = generate_layout(seed=seed, difficulty='hard'), generate_layout(seed=seed, difficulty='hard', climb_max=0.12)
+    assert [(p.name, p.size) for p in a.parts] == [(p.name, p.size) for p in b.parts]

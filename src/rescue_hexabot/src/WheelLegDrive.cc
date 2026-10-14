@@ -7,10 +7,16 @@
 //  * differential: the left rocker turns freely; the right one is driven to mirror it
 //    (velocity -v_l, plus a correction towards q_r = -q_l), which is what a differential
 //    bar enforces: when one rocker tips up the other tips down and the body sits at their
-//    average pitch. Turning on the spot, the wheels' traction twists the two rockers
-//    opposite ways (the high hub turns it into a wind-up that can roll the robot over), so
-//    while turning their range is narrowed from rocker_free to rocker_turn (a suspension
-//    lock, done with joint limits: any force on the rockers stops the motors responding);
+//    average pitch. (Turning on the spot, the wheels' traction twists the two rockers
+//    opposite ways; the URDF keeps their range small, +/-0.15 rad, so that wind-up can't
+//    roll the robot over. Gazebo Fortress ignores joint limits changed at run time.)
+//  * anti-tip: nose or tail past tip_pitch -> no driving that way; roll past roll_guard ->
+//    no turning on the spot and a crawl until level (the body is tall on a narrow track);
+//  * leg-assisted climbing: when the front wheels stall against a step while driving
+//    forward, that side's V opens quickly with the rear wheels anchored, so the leg motors
+//    shove the spinning front wheels up the step face; then the V returns to its stance.
+//    Rear wheels stalled: the V closes with the front wheels anchored on top, pulling the
+//    rear ones up. After climb_attempts failed pushes it stops trying (Nav2 takes over);
 //  * stance and levelling: each side's V is driven to stance +/- a levelling offset that
 //    integrates the body's roll (one side lower -> open the other side's V a bit more);
 //  * wheels: skid steering from cmd_vel, plus whatever spin keeps each tyre rolling while
@@ -33,14 +39,12 @@
 #include <cmath>
 #include <mutex>
 #include <string>
-#include <vector>
 
 #include <ignition/gazebo/Model.hh>
 #include <ignition/gazebo/System.hh>
 #include <ignition/gazebo/Util.hh>
 #include <ignition/gazebo/components/JointVelocityCmd.hh>
 #include <ignition/gazebo/components/JointPosition.hh>
-#include <ignition/gazebo/components/JointPositionLimitsCmd.hh>
 #include <ignition/gazebo/components/JointPositionReset.hh>
 #include <ignition/gazebo/components/JointVelocity.hh>
 #include <ignition/msgs/double.pb.h>
@@ -101,9 +105,14 @@ public:
     legGain_ = get("leg_gain", 6.0);
     diffGain_ = get("diff_gain", 8.0);
     diffFilter_ = get("diff_filter", 0.05);
-    rockerFree_ = get("rocker_free", 0.45);
-    rockerTurn_ = get("rocker_turn", 0.12);
-    rockerLimit_ = rockerFree_;
+    climbOpen_ = get("climb_open", 0.35);
+    climbClose_ = get("climb_close", 0.3);
+    climbRate_ = get("climb_rate", 1.0);
+    pushTime_ = get("push_time", 1.5);
+    stallTime_ = get("stall_time", 0.4);
+    climbAttempts_ = static_cast<int>(get("climb_attempts", 4));
+    tipPitch_ = get("tip_pitch", 0.35);
+    rollGuard_ = get("roll_guard", 0.2);
     levelGain_ = get("level_gain", 1.5);
     levelLimit_ = get("level_limit", 0.3);
     maxSpeed_ = get("max_speed", 0.9);
@@ -162,19 +171,9 @@ public:
     // The free rocker is light and its measured speed jittery: copy a smoothed version.
     vLf_ += (vL - vLf_) * std::min(1.0, dt / diffFilter_);
     setCmd(ecm, rocker_[1], -vLf_ - diffGain_ * (qL + qR));
-    const double wantLimit = std::abs(wz_) > 0.3 ? rockerTurn_ : rockerFree_;
-    const double floor = std::max(std::abs(qL), std::abs(qR)) + 0.01;   // never snap a rocker
-    rockerLimit_ = std::max(ramp(rockerLimit_, wantLimit, (wantLimit < rockerLimit_ ? 1.0 : 2.0) * dt),
-                            std::min(floor, rockerFree_));
-    for (Entity r : rocker_) {
-      const std::vector<math::Vector2d> lim{math::Vector2d(-rockerLimit_, rockerLimit_)};
-      auto * c = ecm.Component<components::JointPositionLimitsCmd>(r);
-      if (c) {
-        c->Data() = lim;
-      } else {
-        ecm.CreateComponent(r, components::JointPositionLimitsCmd(lim));
-      }
-    }
+
+    Climb(ecm, t, dt);
+    pitchNow_ = worldPose(body_, ecm).Rot().Pitch();
 
     if (debug_ && t - lastDebug_ > debugPeriod_) {
       lastDebug_ = t;
@@ -187,13 +186,19 @@ public:
              << first(ecm, wheel_[0][1], true) << std::endl;
     }
     for (int s = 0; s < 2; ++s) {                       // 0 left, 1 right
-      const double desired = std::clamp(stance_ + (s == 0 ? level_ : -level_), stanceMin_, stanceMax_);
+      const double desired = std::clamp(stance_ + climbOffset_ + (s == 0 ? level_ : -level_), stanceMin_, stanceMax_);
       const double before = legTarget_[s];
       legTarget_[s] = ramp(legTarget_[s], desired, legRate_ * dt);
       const double target = legTarget_[s];
       const double rate = dt > 0.0 ? (target - before) / dt : 0.0;   // commanded V opening rate
       const double side = s == 0 ? -1.0 : 1.0;           // turning left: left side slower
-      const double vSide = vx_ + side * wz_ * track_ / 2.0;
+      double drive = tipping_ && vx_ * (-pitchNow_) > 0.0 ? 0.0 : vx_;   // anti-tip
+      double turn = wz_;
+      if (rolling_) {
+        drive = std::clamp(drive, -0.15, 0.15);
+        turn = 0.0;
+      }
+      const double vSide = drive + side * turn * track_ / 2.0;
       for (int e = 0; e < 2; ++e) {                      // 0 front, 1 rear
         const double dir = e == 0 ? 1.0 : -1.0;
         const Entity leg = leg_[s][e], wheel = wheel_[s][e];
@@ -202,13 +207,95 @@ public:
         // Leg spin about +y relative to the body (front joint axis is -y, rear +y), and the
         // wheel centre's forward speed relative to the body, from the commanded opening rate.
         const double legSpin = -dir * rate;
-        const double xdot = dir * legL_ * std::cos(q) * rate;
+        const double xdot = dir * legL_ * std::cos(q) * rate * comp_[e];   // 0: anchored wheel
         setCmd(ecm, wheel, (vSide + xdot) / wheelR_ - legSpin);
       }
     }
   }
 
 private:
+  void Climb(EntityComponentManager & ecm, double t, double dt)
+  {
+    // Body speed along its heading, from its world pose.
+    const auto pose = worldPose(body_, ecm);
+    if (havePrev_ && dt > 0.0) {
+      const math::Vector3d d = pose.Pos() - prevPos_;
+      const double yaw = pose.Rot().Yaw();
+      const double fwd = (d.X() * std::cos(yaw) + d.Y() * std::sin(yaw)) / dt;
+      bodySpeed_ += (fwd - bodySpeed_) * std::min(1.0, dt / 0.2);
+    }
+    prevPos_ = pose.Pos();
+    havePrev_ = true;
+
+    // Stuck: told to drive forward but the body isn't getting anywhere (the wheels may
+    // be stalled or just spinning against the step face).
+    const bool stuck = vx_ > 0.1 && std::abs(wz_) < 0.4 && bodySpeed_ < 0.3 * vx_;
+    stuckFor_ = stuck ? stuckFor_ + dt : 0.0;
+    const double pitch = pose.Rot().Pitch();             // negative: nose up
+    // Anti-tip: nose (or tail) up past tip_pitch while climbing -> stop pushing forward
+    // (or back) until it settles; the high body would otherwise flip over.
+    tipping_ = std::abs(pitch) > tipPitch_;
+    // Roll guard: tilted sideways (one side on rubble), the tall narrow body tips easily,
+    // most of all when turning on the spot: stop turning and creep until it's level again.
+    rolling_ = std::abs(pose.Rot().Roll()) > rollGuard_;
+    // Moving well again for 2 s: the obstacle is behind us, allow new attempts.
+    if (vx_ > 0.1 && bodySpeed_ > 0.5 * vx_) {
+      if (goodSince_ < 0.0) {
+        goodSince_ = t;
+      } else if (t - goodSince_ > 2.0) {
+        attempts_ = 0;
+      }
+    } else {
+      goodSince_ = -1.0;
+    }
+
+    switch (climb_) {
+      case ClimbState::kNormal:
+        comp_ = {1.0, 1.0};
+        if (t > cooldownUntil_ && attempts_ < climbAttempts_) {
+          if (stuckFor_ > stallTime_) {
+            // Level body: the front wheels are against the step. Nose up: the front ones
+            // are up and the rear ones are stuck. Repeated attempts alternate.
+            const bool front = (pitch > -0.1) != (attempts_ % 2 == 1);
+            if (front) {
+              climb_ = ClimbState::kFrontPush;   // open the V: front wheels shoved forward, rear anchored
+              climbTarget_ = climbOpen_;
+              comp_ = {1.0, 0.0};
+            } else {
+              climb_ = ClimbState::kRearPush;    // close the V: rear wheels pulled forward, front anchored
+              climbTarget_ = -climbClose_;
+              comp_ = {0.0, 1.0};
+            }
+          }
+          if (climb_ != ClimbState::kNormal) {
+            ++attempts_;
+            phaseStart_ = t;
+            stuckFor_ = 0.0;
+            if (debug_) {
+              ignmsg << "[WheelLegDrive] stalled at t=" << t << ": "
+                     << (climb_ == ClimbState::kFrontPush ? "front" : "rear") << " push, attempt " << attempts_ << std::endl;
+            }
+          }
+        }
+        break;
+      case ClimbState::kFrontPush:
+      case ClimbState::kRearPush:
+        if (t - phaseStart_ > pushTime_ || vx_ < 0.05 || tipping_) {
+          climb_ = ClimbState::kRecover;
+          climbTarget_ = 0.0;
+          comp_ = {1.0, 1.0};
+        }
+        break;
+      case ClimbState::kRecover:
+        if (std::abs(climbOffset_) < 0.02) {
+          climb_ = ClimbState::kNormal;
+          cooldownUntil_ = t + 0.5;
+        }
+        break;
+    }
+    climbOffset_ = ramp(climbOffset_, climbTarget_, climbRate_ * dt);
+  }
+
   void Init(EntityComponentManager & ecm)
   {
     body_ = model_.LinkByName(ecm, bodyName_);
@@ -274,7 +361,19 @@ private:
   double legGain_{6.0};
   std::array<double, 2> legTarget_{0.6, 0.6};
   double diffGain_{8.0}, diffFilter_{0.05}, vLf_{0.0}, levelGain_{1.5}, levelLimit_{0.3}, level_{0.0};
-  double rockerFree_{0.45}, rockerTurn_{0.12}, rockerLimit_{0.45};
+  // leg-assisted climbing
+  enum class ClimbState { kNormal, kFrontPush, kRearPush, kRecover };
+  ClimbState climb_{ClimbState::kNormal};
+  double climbOpen_{0.35}, climbClose_{0.3}, climbRate_{1.0}, pushTime_{1.5}, stallTime_{0.4};
+  int climbAttempts_{4}, attempts_{0};
+  double climbOffset_{0.0}, climbTarget_{0.0}, phaseStart_{0.0}, cooldownUntil_{0.0}, goodSince_{-1.0};
+  double stuckFor_{0.0};                             // s the body has been stuck while driving
+  double tipPitch_{0.35}, pitchNow_{0.0}, rollGuard_{0.2};
+  bool tipping_{false}, rolling_{false};
+  std::array<double, 2> comp_{1.0, 1.0};             // leg-motion compensation per wheel pair
+  math::Vector3d prevPos_;
+  bool havePrev_{false};
+  double bodySpeed_{0.0};
   double maxSpeed_{0.9}, maxTurn_{2.0}, accel_{1.2}, turnAccel_{4.0}, timeout_{0.5};
   double vx_{0.0}, wz_{0.0};
   transport::Node node_;

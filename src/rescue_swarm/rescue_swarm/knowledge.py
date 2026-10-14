@@ -52,6 +52,13 @@ class ExploredGrid:
     def fraction(self):
         return float(self.mask.mean())
 
+    def fraction_in(self, x0, y0, x1, y1):
+        """Explored fraction of a world rectangle (e.g. a room)."""
+        i0, i1 = max(0, int((x0 - self.x0) / self.res)), min(self.w, int(math.ceil((x1 - self.x0) / self.res)))
+        j0, j1 = max(0, int((y0 - self.y0) / self.res)), min(self.h, int(math.ceil((y1 - self.y0) / self.res)))
+        sub = self.mask[j0:j1, i0:i1]
+        return float(sub.mean()) if sub.size else 0.0
+
 
 class TeamView:
     """One robot's picture of the team."""

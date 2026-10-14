@@ -238,6 +238,7 @@ class Explorer(Node):
 
     def on_team(self, msg):
         st = json.loads(msg.data)
+        self.team_rooms = st.get('rooms') or []
         self.team_others = []
         for r, v in st.get('team', {}).items():
             if r == st.get('robot'):
@@ -335,8 +336,8 @@ class Explorer(Node):
             target = np.array([ox + (i + 0.5) * res, oy + (j + 0.5) * res])
             if self.explored_by_team(*self.to_world(*target)):
                 continue                  # a teammate has already seen what lies beyond
-            if self.blacklisted(*target):
-                continue                  # snapping to a reachable cell led back to a spot that failed
+            if self.blacklisted(*target) or math.hypot(target[0] - rx, target[1] - ry) < 0.5:
+                continue                  # snapped back to a spot that failed, or to where we stand
             # What going there reveals: unknown floor within 1.5 m of the frontier. A frontier
             # with next to nothing behind it is map noise (e.g. in the lidar's blind ring).
             gain = float(unknown[max(0, j - g):j + g + 1, max(0, i - g):i + g + 1].sum()) * res * res
@@ -383,7 +384,7 @@ class Explorer(Node):
             (x, y), length, gain, dist = f
             s = min(gain, 6.0) + 0.5 * min(length, 4.0) - dist
             wx, wy = self.to_world(x, y)
-            s -= self.sector_cost(wx)
+            s -= self.sector_cost(wx, wy)
             # Spread out: frontiers near a teammate or its claimed goal are worth less.
             for ox_, oy_ in self.team_others:
                 d = math.hypot(wx - ox_, wy - oy_)
@@ -400,8 +401,18 @@ class Explorer(Node):
         h, w = self.grid.shape
         return min(max(j, 0), h - 1), min(max(i, 0), w - 1)
 
-    def sector_cost(self, wx):
-        """Extra cost (m) of a frontier outside this robot's strip of the building."""
+    def sector_cost(self, wx, wy=None):
+        """Extra cost (m) of a frontier in a room another robot is searching (the swarm
+        agent's room book: rooms.py). Before the first team state arrives, the building is
+        split into side-by-side strips instead."""
+        rooms = getattr(self, 'team_rooms', None)
+        if rooms and wy is not None:
+            for room in rooms:
+                x0, y0, x1, y1 = room['rect']
+                if x0 <= wx < x1 and y0 <= wy < y1:
+                    mine = room['owner'] == self.get_namespace().strip('/')
+                    return 0.0 if mine or room['done'] else self.sector_penalty
+            return 0.0
         if self.team_size < 2:
             return 0.0
         x0, _, x1, _ = self.rect
@@ -445,7 +456,10 @@ class Explorer(Node):
                 # teammates that have since walked off, or just not have seen the way).
                 unverified.append((np.array([px[k], py[k]]), len(cl) * cres))
                 continue
-            out.append((np.array([ox + (i + 0.5) * res, oy + (j + 0.5) * res]), len(cl) * cres))
+            target = np.array([ox + (i + 0.5) * res, oy + (j + 0.5) * res])
+            if self.blacklisted(*target) or math.hypot(target[0] - rx, target[1] - ry) < 0.5:
+                continue                  # standing there already didn't reveal it
+            out.append((target, len(cl) * cres))
         if not out and unverified:
             # Nothing verified: let Nav2 try the nearest one (a failure is blacklisted).
             out = [min(unverified, key=lambda f: math.hypot(f[0][0] - rx, f[0][1] - ry))]
@@ -578,14 +592,14 @@ class Explorer(Node):
         res = self.info.resolution
         ox, oy = self.info.origin.position.x, self.info.origin.position.y
         rx, ry, yaw = self.pose
-        k = int(0.6 / res)
+        k = int(1.0 / res)               # the corridors ahead/behind reach 1 m
         ci, cj = int((rx - ox) / res), int((ry - oy) / res)
         win = self.grid[max(0, cj - k):cj + k + 1, max(0, ci - k):ci + k + 1]
         jj, ii = np.nonzero(win >= gu.LETHAL)
         dx, dy = -math.cos(yaw), -math.sin(yaw)          # default: back up
+        px = ox + (ii + max(0, ci - k) + 0.5) * res - rx
+        py = oy + (jj + max(0, cj - k) + 0.5) * res - ry
         if len(jj):
-            px = ox + (ii + max(0, ci - k) + 0.5) * res - rx
-            py = oy + (jj + max(0, cj - k) + 0.5) * res - ry
             d2 = np.maximum(px * px + py * py, 1e-4)
             ax, ay = -(px / d2).sum(), -(py / d2).sum()    # push away, nearest strongest
             if math.hypot(ax, ay) > 1e-6:
@@ -604,12 +618,27 @@ class Explorer(Node):
         if self.holonomic:
             cmd.linear.x, cmd.linear.y = speed * bx, speed * by
         else:
-            # Drive out nose or tail first, whichever points closer to the escape direction,
-            # turning that end towards it.
-            ahead = bx >= 0
-            err = math.atan2(by, bx) if ahead else math.atan2(-by, -bx)
-            cmd.linear.x = speed if ahead else -speed
-            cmd.angular.z = max(-1.0, min(1.0, 1.5 * err))
+            # Wheeled: drive straight out along the body (wedged in a doorway, turning only
+            # swings the long body into the jambs), towards whichever of the corridors ahead
+            # and behind holds fewer obstacles; alternate on repeats. Turn only if both are blocked.
+            clear = {}
+            for sign in (1.0, -1.0):
+                if len(jj):
+                    fx = math.cos(yaw) * px + math.sin(yaw) * py       # obstacle cells in the body frame
+                    fy = -math.sin(yaw) * px + math.cos(yaw) * py
+                    # Centre line only: in a doorway the jambs sit right beside the body
+                    clear[sign] = int(((sign * fx > 0.25) & (sign * fx < 1.0) & (np.abs(fy) < 0.18)).sum())
+                else:
+                    clear[sign] = 0
+            best = min(clear, key=lambda sg: (clear[sg], -sg))
+            if repeats % 2 == 1:
+                best = -best
+            if clear[best] <= 3:
+                cmd.linear.x = best * speed
+            else:
+                ahead = bx >= 0
+                err = math.atan2(by, bx) if ahead else math.atan2(-by, -bx)
+                cmd.angular.z = max(-1.0, min(1.0, 1.5 * err))
         self.escape_cmd = cmd
         self.escape_until = self.now() + seconds
         self.get_logger().warn('goals keep failing here: stepping away from the obstacles')

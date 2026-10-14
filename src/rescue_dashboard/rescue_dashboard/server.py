@@ -140,6 +140,18 @@ class Dashboard:
         return wx, wy, yaw + self.starts[r][2]
 
     # ---- shaping the state -------------------------------------------------------------
+    def rooms(self):
+        """Who searches which room: the newest entry per room across the robots' views."""
+        best = {}
+        for st in list(self.node.team.values()):
+            for room in st.get('rooms', []):
+                k = room['key']
+                if k not in best or room.get('t', 0) > best[k].get('t', 0):
+                    best[k] = {**room, 'done': room['done'] or best.get(k, {}).get('done', False)}
+                elif room['done']:
+                    best[k]['done'] = True
+        return list(best.values())
+
     def merged(self, key):
         out = []
         for r in self.robots:
@@ -214,6 +226,7 @@ class Dashboard:
         return {
             'type': 'state', 'mission_time': self.mission_t, 'coverage': coverage,
             'robots': robots, 'victims': victims, 'hazards': hazards, 'links': links,
+            'rooms': self.rooms(),
             'radio_range': n.links.get('los_range', 12.0),
             'events': self.events[-80:], 'history': h,
             'map': self.map_meta,
@@ -223,7 +236,8 @@ class Dashboard:
         g = self.gt
         return {'type': 'world', 'seed': g.get('seed'), 'difficulty': g.get('difficulty', 'normal'),
                 'building': g['building'], 'entrance': g['entrance'], 'spawns': g['spawns'],
-                'extras': g.get('extras', []), 'robots': self.robots}
+                'extras': g.get('extras', []), 'robots': self.robots,
+                'robot_type': getattr(self, 'robot_type', 'wheelleg')}
 
     # ---- images ----------------------------------------------------------------------
     def snapshot(self, robot):
@@ -509,6 +523,7 @@ def main():
     port = probe.declare_parameter('port', 8080).value
     host = probe.declare_parameter('host', '0.0.0.0').value
     open_browser = probe.declare_parameter('open_browser', True).value
+    robot_type = probe.declare_parameter('robot_type', 'wheelleg').value
     probe.destroy_node()
 
     with open(world_json) as f:
@@ -518,6 +533,7 @@ def main():
     executor.add_node(node)
     threading.Thread(target=executor.spin, daemon=True).start()
     dash = Dashboard(node, world_json, robots, port)
+    dash.robot_type = robot_type
     dash.log(f"Mission control up: seed {world.get('seed')}, {len(robots)} robots, "
              f"{world.get('difficulty', 'normal')} building", 'info')
     web_dir = os.path.join(get_package_share_directory('rescue_dashboard'), 'web')

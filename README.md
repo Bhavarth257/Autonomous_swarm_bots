@@ -1,14 +1,16 @@
 # Rescue swarm: autonomous victim search in a collapsed building
 
-ROS 2 Humble + Gazebo Fortress. Three 18-DOF spider hexapods enter a procedurally
-generated collapsed building, map it, walk over low debris, find victims (visible
+ROS 2 Humble + Gazebo Fortress. Three wheel-leg robots (four wheels on two rocker legs,
+linked by a differential) enter a procedurally generated collapsed building, split its
+rooms between them, map it, drive over low debris, find victims (visible
 ones with a camera + YOLOv8, buried ones with a thermal camera), share what they know
-over a range-limited radio without any central controller, and walk back out. A web
+over a range-limited radio without any central controller, and drive back out. The
+earlier robots (a six-wheel rover and an 18-DOF hexapod) are still available with `robot:=`. A web
 mission control (http://localhost:8080) starts the whole search with one button, shows
 every robot's cameras and the combined map, and lets you take over any robot, drive it,
 or drop new victims into the running world.
 
-![hexapod](docs/hexapod.png)
+![wheel-leg robot](docs/wheelleg_quarter.png)
 
 ![mission dashboard](docs/dashboard.png)
 
@@ -95,13 +97,14 @@ Useful launch arguments:
 | `grid` | 4 | rooms per side (4 = 4x4 rooms, 24 x 20 m) |
 | `difficulty` | normal | `hard`: narrow doors, stepped debris, smoke, dark rooms |
 | `victims_file` | | JSON with your own victims instead of the random ones |
-| `num_robots` | 1 | 1-3 hexapods |
+| `num_robots` | 1 | 1-3 robots |
+| `robot` | wheelleg | `wheelleg`, `rover` (six wheels) or `hexapod` |
 | `auto_start` | false | start exploring without pressing START |
 | `time_limit` | 1200 | seconds; each robot heads home early enough (from its distance to the entrance) to be out by then |
 | `gui`, `rviz`, `dashboard` | true | Gazebo, RViz, web mission control |
 | `port`, `open_browser` | 8080, true | mission control address; open a browser tab at start |
 | `perception`, `swarm` | true | victim detector; radio + swarm agents |
-| `radio_range`, `radio_wall_range` | 12, 4 | m: line of sight, through walls |
+| `radio_range`, `radio_wall_range` | 25, 8 | m: line of sight, through walls |
 | `evaluate` | false | score against ground truth, write a report, shut down |
 
 ## Mission control
@@ -124,8 +127,10 @@ The robots are autonomous; everything below is optional.
   walked per robot) and a **timeline** of events.
 
 **Intervening.** **Take over** puts a robot in manual mode: drive it with the on-screen
-joystick or the keyboard (**W/S** forward/back, **A/D** turn, **Q/E** crab walk; the
-robot stops if commands stop for 0.4 s). Or pick **Send robot here** and click the map:
+joystick or the keyboard (**W/S** forward/back, **A/D** turn, **Q/E** crab walk for the
+hexapod; the robot stops if commands stop for 0.4 s). From a terminal instead:
+`ros2 run rescue_navigation teleop` (arrow keys, **1/2/3** picks the robot, **R/F** raises or
+lowers the wheel-leg robot). Or pick **Send robot here** and click the map:
 the robot walks there with Nav2 and holds. **Resume autonomy** hands it back to its
 explorer, which carries on where it left off.
 
@@ -156,8 +161,8 @@ since the server listens on all interfaces; anyone who can open it can drive the
                  Gazebo Fortress (physics, 3D lidar, RGB + thermal cameras)
                                        │
    per robot rN ───────────────────────┼───────────────────────────────────────────
-   HexWalk plugin (18-joint IK gait) ◄─ cmd_vel ── Nav2 (NavFn A*, Regulated Pure Pursuit)
-   hexabot_odom (legged odometry)                      ▲ nav_map
+   drive plugin (WheelLegDrive) ◄─ cmd_vel ── Nav2 (NavFn A*, Regulated Pure Pursuit)
+   odometry (drifting)                                 ▲ nav_map
    SLAM Toolbox (2D) ── map ──► traversability ────────┘ (height map + SLAM + geofence)
    explorer (frontiers, own + team) ◄── team/state ── swarm_agent ◄─► radio channel ◄─► other robots
    ─────────────────────────────────────────────────────────────────────────────────
@@ -168,15 +173,43 @@ since the server listens on all interfaces; anyone who can open it can drive the
 | Package | What it does |
 |---|---|
 | `rescue_world` | Seeded building generator: 4x4 rooms (`grid`), doors (some buried in rubble), breaches, climbable debris (blocks, joists, gravel, ramped mounds) and blocking debris, Rescue Randy victims lying or sitting (some buried under warm debris), a hot decoy; `hard` adds 0.85 m doors, stepped debris, smoke (blinds the RGB camera, not thermal or lidar) and dark rooms under a collapsed roof; or your own victims from a file. Writes the SDF world and the ground truth. |
-| `rescue_description` | Hexapod URDF: kit-style body, 6 legs x 3 joints, 16-ring 3D lidar, RGB + thermal cameras, IMU. |
-| `rescue_hexabot` | `HexWalk` Gazebo plugin (tripod gait, IK, body levelling, climb slow-down, 30 Hz joint states) and `hexabot_odom` (drifting legged odometry). |
-| `rescue_navigation` | `traversability` (height map -> nav_map), `explorer` (mission state machine, frontiers, unstick, Nav2 self-healing, operator take-over and go-to), SLAM/Nav2 configuration. |
+| `rescue_description` | Robot URDFs (wheel-leg, rover, hexapod), each with a 16-ring 3D lidar, RGB + thermal cameras and an IMU. |
+| `rescue_hexabot` | Gazebo plugins: `RescueWheelLegDrive` (wheels, rocker differential, stance, levelling, tip guards) and `HexWalk` (hexapod gait); odometry; the local FastDDS profile. |
+| `rescue_navigation` | `traversability` (height map -> nav_map), `explorer` (mission state machine, frontiers, unstick, Nav2 self-healing, operator take-over and go-to), SLAM/Nav2 configuration, `robot_profiles` (everything that differs between the robots), keyboard `teleop`. |
 | `rescue_perception` | `victim_detector`: YOLOv8 persons + thermal body blobs, placed with lidar and the floor plane, fused into victims per robot. |
-| `rescue_swarm` | `radio` (simulated channel) and `swarm_agent` (gossip: poses, claimed goals, explored areas, victims). |
+| `rescue_swarm` | `radio` (simulated channel), `swarm_agent` (gossip: poses, claimed goals, explored areas, victims, who searches which room) and `rooms` (the room split). |
 | `rescue_dashboard` | Web mission control (aiohttp server + ROS 2 node, page in `web/`). |
 | `rescue_eval` | `evaluate` (score against ground truth) and `run_batch` (many seeds headless). |
 
-### Hexapod
+### Wheel-leg robot (default)
+
+![side views: tall, normal, low stance](docs/wheelleg_side_normal.png)
+
+A red 0.66 m body on two legs per side. Each side's front and rear leg form a V (a
+rocker) on a hub that turns freely, and a differential links the two sides: when one
+rocker tips up, the other tips down, so all four wheels stay on uneven ground and the
+body pitches by only half as much. One motor per side opens or closes the V: a narrow V
+stands tall (body 0.53 m up), a wide one crouches (0.40 m). In missions the robot keeps
+a fixed 0.5 rad stance chosen so its wheelbase is no longer than its track, which skid
+steering needs to turn in place. The legs also level the body sideways on a cross
+slope.
+
+The `RescueWheelLegDrive` plugin drives the wheels from `cmd_vel` (skid steer), runs the
+stance and levelling, and has two guards: going down a pitch it stops driving further
+downhill, and past a 0.2 rad (11 deg) roll it slows to a crawl and stops turning until
+the levelling has the body upright again. `/rN/stance` (`std_msgs/Float64`, rad) changes
+the stance.
+
+Measured (`robot:=wheelleg`): 0.48 m/s cruise, 0.9 rad/s turning in place, climbs 8 cm
+blocks and 10 cm joists (10 cm blocks only half the time), stays level across a 12 deg
+slope and with one side up on an 8 cm plank, fits 0.85 m doors. Worlds made for it use
+debris no higher than 9 cm (`world_climb_max` in `robot_profiles.py`).
+
+Leg-assisted climbing (lifting the front wheels onto a step with the stance motors) was
+tried and dropped: the robot flipped too often. The code is there, off
+(`climb_attempts 0`).
+
+### Hexapod (`robot:=hexapod`)
 
 An 18-DOF spider hexapod styled after hobby kits. All joints are physically simulated:
 the `HexWalk` plugin computes inverse kinematics for a tripod gait from `cmd_vel`
@@ -192,7 +225,7 @@ and 20 cm mounds over 15 deg ramps without flipping.
 ### Mapping and navigation (per robot)
 
 - **SLAM Toolbox** builds the wall map from a 2D scan cut out of the 3D cloud at
-  0.4-1.5 m height (above the robots, so teammates never end up in the map as walls), and corrects odometry drift.
+  height band starting above the robots (0.8 m for the wheel-leg robot, 0.4 m for the others), so teammates never end up in the map as walls, and corrects odometry drift.
 - **traversability** keeps a 10 cm height map from the 3D lidar and publishes `nav_map`:
   lethal for walls, anything taller than 40 cm and the top of any step taller than
   14 cm (victims, mound edges); 20-70 for climbable steps so paths prefer flat floor;
@@ -221,11 +254,21 @@ and 20 cm mounds over 15 deg ramps without flipping.
 ### Swarm
 
 No robot is in charge. The **radio** node is the physics of the channel: robots hear
-each other within 12 m with line of sight, or 4 m through walls. Each **swarm_agent**
+each other within 25 m with line of sight, or 8 m through walls. Each **swarm_agent**
 broadcasts its team view once a second and merges what it hears (newest entry wins),
 so news travels through teammates: positions, claimed goals, a 0.5 m explored grid per
-robot, and victims. Explorers skip areas teammates covered and keep away from their
-positions and goals.
+robot, victims, and who searches which room. Explorers skip areas teammates covered and
+keep away from their positions and goals.
+
+**Rooms.** Every robot computes the same starting split from the building plan without
+talking: rooms ordered by bearing from the entrance, left to right, cut into one equal
+group per robot. Each explorer prefers frontiers in its own rooms. A room counts as done
+once 85 % of it has been seen by anyone. A robot whose rooms are all done takes the
+nearest half of the busiest teammate's unfinished rooms, but never the room that teammate
+is in or heading to, never from a teammate with only one room left, and never a room that
+changed hands in the last minute (otherwise two idle robots pass the last room back and
+forth). Take-overs spread by gossip, newest wins. The dashboard's **rooms** layer tints
+each room by owner.
 
 ### Evaluation
 
@@ -266,6 +309,10 @@ hazard handling, floor coverage, mission time, robots back at the start.
   `Message Filter dropping message ... queue is full`**: a run that crashed or was killed
   left stale shared-memory files behind, and ROS messages get lost. With nothing ROS
   running, `fastdds shm clean`, then launch again.
+- **Only some nodes see each other, robots never start** (Wi-Fi networks that block
+  multicast): sourcing `install/setup.bash` points FastDDS at a localhost-only unicast
+  profile (`rescue_hexabot/config/fastdds_local.xml`), unless `FASTRTPS_DEFAULT_PROFILES_FILE`
+  is already set. Everything runs on one machine, so nothing needs the network.
 - **Mission control shows "address already in use"**: another run is still up, or
   something else uses 8080; pass `port:=8090`.
 - **No cameras on the page**: they appear once Gazebo renders its first frames
@@ -289,9 +336,10 @@ ROS's launch_testing plugin.
 
 | Topic | |
 |---|---|
-| `/rN/cmd_vel` | walk command: `linear.x`, `linear.y` (crab walk), `angular.z` |
+| `/rN/cmd_vel` | drive command: `linear.x`, `angular.z` (`linear.y`: hexapod crab walk) |
+| `/rN/stance` | wheel-leg robot: rocker V half-angle, rad (`std_msgs/Float64`) |
 | `/rN/odom`, `/rN/odom/tilt` | legged odometry, body roll/pitch |
-| `/rN/lidar/points`, `/rN/scan` | 3D cloud; 2D scan 0.4-1.5 m above the floor |
+| `/rN/lidar/points`, `/rN/scan` | 3D cloud; 2D scan cut from it above teammates' height |
 | `/rN/camera/*`, `/rN/thermal/*`, `/rN/imu` | sensors |
 | `/rN/map`, `/rN/nav_map` | SLAM map; fused navigation map |
 | `/rN/mission/status` | explorer state (JSON, 1 Hz) |

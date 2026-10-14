@@ -50,12 +50,12 @@ def _robot(ns, spawn, description, slam, odom_drift, prof):
         Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
              name='cloud_to_scan', namespace=ns,
              remappings=[('cloud_in', 'lidar/points'), ('scan', 'scan')],
-             # The SLAM scan starts above a hexapod's height (0.31 m): a teammate walking past
+             # The SLAM scan starts above a teammate's height (profile): a teammate walking past
              # would otherwise become a wall in the map, and one recorded closer than the
              # scan's 0.45 m minimum range is never cleared again, trapping the robot.
              # Anything lower is the 3D height map's job (traversability).
              parameters=[{'target_frame': f'{ns}/base_footprint', 'transform_tolerance': 0.05,
-                          'min_height': 0.40, 'max_height': 1.5,
+                          'min_height': prof['scan_min_height'], 'max_height': 1.5,
                           'angle_min': -3.14159, 'angle_max': 3.14159, 'angle_increment': 0.0087,
                           'scan_time': 0.1, 'range_min': 0.45, 'range_max': 15.0,
                           'use_inf': True, **sim_time}]),
@@ -93,7 +93,9 @@ def _setup(context):
     seed, n = int(arg('seed')), int(arg('num_robots'))
     gui, rviz, slam, drift = (arg(k) == 'true' for k in ('gui', 'rviz', 'slam', 'odom_drift'))
 
-    paths = generate_from_launch(seed, n, int(arg('grid')), arg('difficulty'), arg('victims_file'))
+    prof = profile(arg('robot'))
+    paths = generate_from_launch(seed, n, int(arg('grid')), arg('difficulty'), arg('victims_file'),
+                                 climb_max=prof['world_climb_max'])
     with open(paths['json']) as f:
         gt = json.load(f)
     print(f'[rescue] world {paths["sdf"]} | preview {paths["preview"]}')
@@ -108,7 +110,6 @@ def _setup(context):
     stop_gz = RegisterEventHandler(OnShutdown(on_shutdown=[ExecuteProcess(
         cmd=['pkill', '-INT', '-f', f'gazebo -r .*{paths["sdf"]}'], output='log')]))
 
-    prof = profile(arg('robot'))
     xacro_file = os.path.join(get_package_share_directory('rescue_description'), 'urdf', prof['xacro'])
     namespaces = [f'r{k + 1}' for k in range(n)]
     actions = [gz, stop_gz]
@@ -146,10 +147,11 @@ def _clean_env():
     # runs on this machine, so keep it on loopback (unless the user chose otherwise).
     if 'IGN_IP' not in os.environ:
         actions.append(SetEnvironmentVariable('IGN_IP', '127.0.0.1'))
-    # FastDDS without shared memory (see config/fastdds_udp.xml), unless the user set a profile.
+    # FastDDS on localhost by unicast (rescue_hexabot/config/fastdds_local.xml); sourcing the
+    # workspace already sets this, the launch makes sure of it.
     if 'FASTRTPS_DEFAULT_PROFILES_FILE' not in os.environ:
         actions.append(SetEnvironmentVariable('FASTRTPS_DEFAULT_PROFILES_FILE', os.path.join(
-            get_package_share_directory('rescue_bringup'), 'config', 'fastdds_udp.xml')))
+            get_package_share_directory('rescue_hexabot'), 'config', 'fastdds_local.xml')))
     # A terminal inside snap-packaged VS Code leaks the snap's GTK paths, and RViz then
     # loads the snap's libpthread and dies ("undefined symbol: __libc_pthread_init").
     if os.environ.get('SNAP_NAME') == 'code':

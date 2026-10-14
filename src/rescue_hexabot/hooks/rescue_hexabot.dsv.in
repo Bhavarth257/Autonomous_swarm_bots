@@ -1,1 +1,2 @@
 prepend-non-duplicate;IGN_GAZEBO_SYSTEM_PLUGIN_PATH;lib
+set-if-unset;FASTRTPS_DEFAULT_PROFILES_FILE;share/rescue_hexabot/config/fastdds_local.xml

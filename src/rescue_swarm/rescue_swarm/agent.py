@@ -11,7 +11,8 @@ is in charge; information spreads by gossip through whoever is in range.
   out  radio/out        broadcast
        team/state       std_msgs/String JSON, 1 Hz: teammates (pose, goal, state, age of
                         the news, whether in direct radio contact), explored fractions,
-                        team victim list (world frame); read by the explorer and dashboard
+                        team victim list (world frame), and who searches which room
+                        (rooms.py: owner, done, rectangle); read by the explorer and dashboard
        team/explored    nav_msgs/OccupancyGrid (frame `world`): explored by others (100)
                         and by this robot (50), for RViz
 """
@@ -27,6 +28,7 @@ from std_msgs.msg import String
 
 from rescue_navigation import grid_utils as gu
 from rescue_swarm.knowledge import TeamView
+from rescue_swarm.rooms import RoomBook, room_rects
 
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
                      reliability=ReliabilityPolicy.RELIABLE)
@@ -41,6 +43,11 @@ class Agent(Node):
         rate = self.declare_parameter('broadcast_rate', 1.0).value
         self.contact_timeout = self.declare_parameter('contact_timeout', 3.0).value
         self.team = TeamView(self.me, rect)
+        # Rooms: the building's grid of rooms, split between the team (rooms.py).
+        grid = list(self.declare_parameter('rooms_grid', [4, 4]).value)
+        entrance = list(self.declare_parameter('entrance', [(rect[0] + rect[2]) / 2, rect[1]]).value)
+        robots = list(self.declare_parameter('team', [self.me]).value)
+        self.rooms = RoomBook(room_rects(rect, int(grid[0]), int(grid[1])), robots, entrance)
         self.status = None
         self.grid_msg = None
         self.sent = self.received = 0
@@ -74,6 +81,8 @@ class Agent(Node):
         data = json.loads(msg.data)
         if data.get('from') != self.me:
             self.team.receive(data, self.now())
+            if 'rooms' in data:
+                self.rooms.merge(data['rooms'])
             self.received += 1
 
     def update_explored(self):
@@ -98,9 +107,25 @@ class Agent(Node):
             goal = self.status.get('goal')
             wgoal = self.to_world(*goal) if goal else None
             self.team.set_self((wx, wy, yaw + self.map_in_world[2]), wgoal, self.status['state'], t)
-        self.pub_radio.publish(String(data=json.dumps(self.team.message(t))))
+        self.update_rooms(t)
+        msg = self.team.message(t)
+        msg['rooms'] = self.rooms.message()
+        self.pub_radio.publish(String(data=json.dumps(msg)))
         self.sent += 1
         self.publish_state(t)
+
+    def update_rooms(self, t):
+        """Own rooms all done: take some from the busiest teammate (rooms.py)."""
+        explored = self.team.explored_by_team()
+        self.room_done = self.rooms.done(explored.fraction_in)
+        me = self.team.poses.get(self.me)
+        if me is None or self.status is None or self.status.get('state') != 'exploring':
+            return
+        busy = [p[:2] for r, p in self.team.poses.items() if r != self.me]
+        busy += [g[:2] for r, g in self.team.goals.items() if r != self.me and g[0] is not None]
+        taken = self.rooms.rebalance(self.me, me[:2], busy, self.room_done, t)
+        if taken:
+            self.get_logger().info(f'own rooms done: took over {", ".join(taken)}')
 
     def publish_state(self, t):
         team = {}
@@ -124,6 +149,9 @@ class Agent(Node):
             'victims': [v.to_dict() for v in self.team.victims.confirmed()],
             'hazards': [v.to_dict() for v in self.team.hazards.hazards()],
             'radio': {'sent': self.sent, 'received': self.received},
+            'rooms': [{'key': k, 'owner': self.rooms.owner(k), 't': round(self.rooms.book[k][1], 1),
+                       'done': bool(getattr(self, 'room_done', {}).get(k)),
+                       'rect': [round(v, 2) for v in r]} for k, r in self.rooms.rooms.items()],
         }
         self.pub_state.publish(String(data=json.dumps(state)))
 

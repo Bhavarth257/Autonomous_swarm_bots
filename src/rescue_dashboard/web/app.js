@@ -13,7 +13,7 @@ let world = null;        // static info: building, spawns, extras, robots
 let state = null;        // live state from the server
 let selected = null;     // selected robot
 let mode = 'select';
-const layers = { map: true, trails: true, radio: false, goals: true, victims: true };
+const layers = { map: true, rooms: true, trails: true, radio: false, goals: true, victims: true };
 const view = { scale: 20, ox: 0, oy: 0, fitted: false };
 let mapImg = new Image();       // the map being drawn
 let mapMeta = null;             // its geometry
@@ -53,10 +53,12 @@ function onReply(msg) {
 // ---------------------------------------------------------------- world / state
 function robotColor(r) { return COLORS[world.robots.indexOf(r) % COLORS.length]; }
 
+const ROBOT_NAMES = {wheelleg: 'wheel-leg robots', rover: 'rovers', hexapod: 'hexapods'};
+
 function onWorld(w) {
   world = w;
   $('subtitle').textContent = `seed ${w.seed} · ${w.building.cols}×${w.building.rows} rooms · ` +
-    `${w.difficulty} · ${w.robots.length} hexapods`;
+    `${w.difficulty} · ${w.robots.length} ${ROBOT_NAMES[w.robot_type] || 'robots'}`;
   if (!selected) selected = w.robots[0];
   buildRobotCards();
   buildCams();
@@ -379,6 +381,21 @@ function draw() {
     ctx.fillStyle = e.type === 'smoke' ? '#9fb0d0' : '#8b949e';
     ctx.font = '11px sans-serif';
     ctx.fillText(e.type === 'smoke' ? 'smoke' : 'dark (roof)', a + 4, b + 13);
+  }
+  // who searches which room (swarm room book): owner's colour, fainter once done
+  if (layers.rooms && state && state.rooms) {
+    for (const room of state.rooms) {
+      const [rx0, ry0, rx1, ry1] = room.rect;
+      const [a, b] = toScreen(rx0, ry1);
+      const col = world.robots.includes(room.owner) ? robotColor(room.owner) : '#888888';
+      ctx.fillStyle = col + (room.done ? '0d' : '24');
+      ctx.fillRect(a, b, (rx1 - rx0) * s, (ry1 - ry0) * s);
+      ctx.fillStyle = col + 'cc';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(room.owner + (room.done ? ' ✓' : ''), a + (rx1 - rx0) * s - 4, b + (ry1 - ry0) * s - 4);
+      ctx.textAlign = 'left';
+    }
   }
   ctx.strokeStyle = '#30363d';
   ctx.setLineDash([4, 6]);

@@ -33,7 +33,7 @@ DOOR_W_HARD = 0.85
 ENTRANCE_W = 1.4
 ROBOT_RADIUS = 0.30    # used to inflate blocking obstacles for the reachability check
 GRID_RES = 0.05
-CLIMB_MAX_H = 0.12     # tallest step generated as climbable (tested on the gait course)
+CLIMB_MAX_H = 0.12     # tallest step generated as climbable (default; climb_max per robot)
 BLOCK_MIN_H = 0.28     # shortest obstacle generated as blocking
 
 CONCRETE = (0.58, 0.57, 0.55)
@@ -100,8 +100,9 @@ def _seg_dist(px, py, ax, ay, bx, by):
 
 class _Builder:
     def __init__(self, rng: random.Random, cols, rows, room_w, room_h, victim_style='primitive',
-                 hard=False):
+                 hard=False, climb_max=CLIMB_MAX_H):
         self.rng = rng
+        self.climb_max = climb_max
         self.victim_style = victim_style
         self.hard = hard
         self.extras = []
@@ -246,7 +247,7 @@ class _Builder:
             return
         yaw = self.rng.uniform(-math.pi, math.pi)
         if thin:
-            h = self.rng.uniform(0.09, CLIMB_MAX_H)
+            h = self.rng.uniform(min(0.09, self.climb_max - 0.01), self.climb_max)
             self.box('joist', (length, 0.15, h), (p[0], p[1], h / 2, 0, 0, yaw),
                      (0.45, 0.36, 0.26), climbable=True)
         else:
@@ -258,7 +259,7 @@ class _Builder:
         p = self.sample_free(room, 0.35, clear=0.25, passage_clear=0.6)
         if p is None:
             return
-        h = self.rng.uniform(0.05, CLIMB_MAX_H)
+        h = self.rng.uniform(0.05, self.climb_max)
         self.box('block', (self.rng.uniform(0.3, 0.6), self.rng.uniform(0.3, 0.6), h),
                  (p[0], p[1], h / 2, 0, 0, self.rng.uniform(-math.pi, math.pi)),
                  self.rubble_color(), climbable=True)
@@ -508,8 +509,10 @@ def _check(b: _Builder, layout: Layout, check_victims=True):
 
 def generate_layout(seed=0, cols=4, rows=4, room_w=6.0, room_h=5.0,
                     n_visible=4, n_buried=2, n_decoys=1, n_robots=3, max_attempts=50,
-                    victim_style='auto', difficulty='normal', custom_victims=None) -> Layout:
+                    victim_style='auto', difficulty='normal', custom_victims=None,
+                    climb_max=CLIMB_MAX_H) -> Layout:
     """victim_style: 'randy' (Fuel mannequin meshes), 'primitive', or 'auto' (randy if cached).
+    climb_max: tallest climbable step for the robot that will search it (others are walls).
     difficulty: 'normal' or 'hard'.
     custom_victims: list of {x, y, posture: lying|sitting, buried: bool, yaw (deg, optional)}
     replacing the random victims."""
@@ -519,17 +522,18 @@ def generate_layout(seed=0, cols=4, rows=4, room_w=6.0, room_h=5.0,
     for attempt in range(max_attempts):
         try:
             return _try(seed, attempt, cols, rows, room_w, room_h,
-                        n_visible, n_buried, n_decoys, n_robots, victim_style, difficulty, custom_victims)
+                        n_visible, n_buried, n_decoys, n_robots, victim_style, difficulty, custom_victims,
+                        climb_max)
         except LayoutError as e:
             last = e
     raise LayoutError(f'seed {seed}: no valid layout in {max_attempts} attempts ({last})')
 
 
 def _try(seed, attempt, cols, rows, room_w, room_h, n_visible, n_buried, n_decoys, n_robots,
-         victim_style, difficulty='normal', custom_victims=None):
+         victim_style, difficulty='normal', custom_victims=None, climb_max=CLIMB_MAX_H):
     rng = random.Random(seed * 1000 + attempt)
     hard = difficulty == 'hard'
-    b = _Builder(rng, cols, rows, room_w, room_h, victim_style, hard)
+    b = _Builder(rng, cols, rows, room_w, room_h, victim_style, hard, climb_max)
     W, H = b.width, b.height
     door_w = DOOR_W_HARD if hard else DOOR_W
 

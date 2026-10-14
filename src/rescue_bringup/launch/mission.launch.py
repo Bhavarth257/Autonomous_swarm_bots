@@ -34,7 +34,8 @@ def _autonomy(context):
     prof = profile(arg('robot'))
     # Same seed -> same files the sim launch generated; we only need the ground plan
     # the rescuers would have: the building outline and where the robots start.
-    paths = generate_from_launch(seed, n, int(arg('grid')), arg('difficulty'), arg('victims_file'))
+    paths = generate_from_launch(seed, n, int(arg('grid')), arg('difficulty'), arg('victims_file'),
+                                 climb_max=prof['world_climb_max'])
     with open(paths['json']) as f:
         gt = json.load(f)
     rect = (0.0, 0.0, gt['building']['width'], gt['building']['height'])
@@ -52,7 +53,10 @@ def _autonomy(context):
         if arg('swarm') == 'true':
             actions.append(Node(package='rescue_swarm', executable='swarm_agent', namespace=sp['name'],
                                 output='log', parameters=[{'building_rect': list(rect),
-                                                           'map_in_world': [float(v) for v in start], **sim}]))
+                                                           'map_in_world': [float(v) for v in start],
+                                                           'rooms_grid': [int(gt['building']['cols']), int(gt['building']['rows'])],
+                                                           'entrance': [float(gt['entrance']['x']), float(gt['entrance']['y'])],
+                                                           'team': names, **sim}]))
     if arg('swarm') == 'true':
         actions.append(Node(package='rescue_swarm', executable='radio', output='log',
                             parameters=[{'robots': names, 'map_yaml': paths['map_yaml'],
@@ -66,6 +70,7 @@ def _autonomy(context):
                                          'building_rect': list(rect),
                                          'body_height': float(prof['body_height']),
                                          'teammate_radius': float(prof['teammate_radius']),
+                                         'teammate_height': float(prof['teammate_height']),
                                          'robot_exclusion': float(prof['teammate_radius']) + 0.4, **sim}]))
     if arg('evaluate') == 'true':
         out = os.path.expanduser(f"~/rescue_reports/seed{seed}_{n}robots")
@@ -78,7 +83,7 @@ def _autonomy(context):
     if arg('dashboard') == 'true':
         actions.append(Node(package='rescue_dashboard', executable='dashboard', output='screen',
                             parameters=[{'seed': seed, 'robots': names, 'world_json': paths['json'],
-                                         'port': int(arg('port')),
+                                         'port': int(arg('port')), 'robot_type': arg('robot'),
                                          'open_browser': arg('open_browser') == 'true', **sim}]))
     return actions
 
@@ -97,10 +102,10 @@ def generate_launch_description():
                           'gui': LaunchConfiguration('gui'),
                           'rviz': LaunchConfiguration('rviz'),
                           'slam': 'true'}.items())
-    # FastDDS without shared memory for every node here (see config/fastdds_udp.xml).
+    # FastDDS on localhost by unicast for every node here (rescue_hexabot/config/fastdds_local.xml).
     env = [] if 'FASTRTPS_DEFAULT_PROFILES_FILE' in os.environ else [SetEnvironmentVariable(
         'FASTRTPS_DEFAULT_PROFILES_FILE',
-        os.path.join(get_package_share_directory('rescue_bringup'), 'config', 'fastdds_udp.xml'))]
+        os.path.join(get_package_share_directory('rescue_hexabot'), 'config', 'fastdds_local.xml'))]
     return LaunchDescription(env + [
         DeclareLaunchArgument('seed', default_value='0'),
         DeclareLaunchArgument('grid', default_value='4', description='rooms per side (4 -> 4x4)'),
