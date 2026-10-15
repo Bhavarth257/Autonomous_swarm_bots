@@ -39,7 +39,7 @@ source install/setup.bash
 ros2 launch rescue_bringup mission.launch.py seed:=4 num_robots:=3 difficulty:=hard
 ```
 
-Gazebo, RViz and **mission control** (http://localhost:8080) open. Press **Start all**.
+Gazebo, RViz and mission control (http://localhost:8080) open. Press **Start all**.
 The robots explore, report victims and come back by themselves. Stop with Ctrl+C.
 
 Launch arguments:
@@ -118,18 +118,12 @@ Gazebo Fortress quirks it works around (useful if you change it):
 | setting | why |
 |---|---|
 | Costmap cost falls off gently (radius 1.0 m) | NavFn plans for a point. A steep fall-off made paths hug walls, and the corners of the 0.60 m body scraped door jambs. Now paths run down the middle. |
-| `wall_guard` between Nav2 and the wheels | Last check from the 3D lidar (below). |
+| `wall_guard` between Nav2 and the wheels | A last check from the 3D lidar before the wheels move (rules in [Navigation](#4-navigation-nav2--wall_guard)). |
 | 2D scan starts at 1.0 m | Teammates' camera heads reach ~0.85 m. Below that they got into the SLAM scan as walls. |
 | Global costmap from `nav_map` only | Scan marks far from the robot are never cleared. A teammate caught in the scan once sealed the entrance for everyone's trip home. |
 | Own path kept walkable 0.36 m wide, teammates cleared 0.9 m around | Ghosts of teammates in a doorway can't close the way back. |
 
-**`wall_guard`** looks at the 3D lidar every control cycle:
-- steers away from anything within 12 cm of a side, and towards the middle in a doorway;
-- stops forward motion if something is right ahead;
-- creeps clear of a corner it would hit while turning in place;
-- backs off at once if it is pushing against something without moving.
-
-The explorer's escape moves, Nav2 recoveries and teleop bypass it.
+The explorer's escape moves, Nav2 recoveries and teleop bypass `wall_guard`.
 
 **Measured** (robot alone):
 - 0.48 m/s straight, 0.8 rad/s turning in place;
@@ -195,8 +189,8 @@ per robot.
   reported as visible (and the reverse).
 - **Variation:** results vary from run to run (physics, timing).
 
-The problems met while building all this, and how each was solved, are in
-[ISSUES_FACED.md](ISSUES_FACED.md).
+[ISSUES_FACED.md](ISSUES_FACED.md) lists the problems met during development and how each
+was fixed.
 
 ## Mission control
 
@@ -317,7 +311,8 @@ flowchart LR
 ### 2. Robot motion: `rescue_wheelleg/`
 
 The plugin takes `/rN/cmd_vel` and `/rN/stance` and commands joint **velocities**.
-Gazebo's physics then does the actual driving, so contacts, slip and tipping are real.
+Gazebo's physics moves the robot, so contacts, wheel slip and tipping come from the
+simulation rather than from the plugin.
 
 ```mermaid
 flowchart LR
@@ -413,7 +408,7 @@ stateDiagram-v2
 Each control step while exploring:
 
 1. **Find frontiers:** walkable `nav_map` cells next to unknown ones, inside the
-   building, that the robot can actually reach. Skip ones a teammate has already seen,
+   building, that the robot can reach. Skip ones a teammate has already seen,
    blacklisted ones and ones underfoot.
 2. **Score each frontier** by what it would reveal against the driving distance, minus a
    penalty near teammates and their goals.
@@ -508,7 +503,7 @@ flowchart TB
 - **down:** tipped past 60° for 5 s. Its explorer then stops.
 - **stuck:** less than 0.5 m of progress in 2 minutes while trying to move.
 
-Silence is never taken as failure.
+A robot that is only out of radio range is not marked down.
 
 ### 8. Mission control: `rescue_dashboard/`
 
@@ -625,8 +620,9 @@ real time, since the simulation runs at about 0.4x real time with everything on.
 - **Only some nodes see each other:** check that you sourced `install/setup.bash`,
   which sets the localhost FastDDS profile unless `FASTRTPS_DEFAULT_PROFILES_FILE` is
   already set.
-- **Everything freezes when Wi-Fi drops:** Gazebo transport is pinned to loopback
-  (`IGN_IP=127.0.0.1`) by the launch file for exactly this reason.
+- **Everything freezes when Wi-Fi drops:** the launch file pins Gazebo transport to
+  loopback (`IGN_IP=127.0.0.1`) to prevent this, unless `IGN_IP` is already set in your
+  shell. Unset it and launch again.
 - **Mission control shows "address already in use":** another run is still up; pass
   `port:=8090`.
 - **No cameras on the page:** they appear once Gazebo renders its first frames, 10-20 s
