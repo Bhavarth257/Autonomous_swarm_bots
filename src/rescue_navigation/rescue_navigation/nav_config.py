@@ -92,6 +92,10 @@ def nav2_params(ns, bt_xml=None, robot=DEFAULT):
 
     ctrl = d['controller_server']['ros__parameters']
     ctrl['controller_frequency'] = 20.0
+    # A late map->odom transform (SLAM behind under load) used to abort the path at once
+    # ("Controller patience exceeded") and the explorer then backed away as if stuck. Ride
+    # out a second of that instead.
+    ctrl['failure_tolerance'] = 1.0
     ctrl['progress_checker'].update({'required_movement_radius': 0.3, 'movement_time_allowance': 20.0})
     ctrl['general_goal_checker'].update({'xy_goal_tolerance': 0.35, 'yaw_goal_tolerance': 6.28})
     ctrl['FollowPath'] = {
@@ -103,20 +107,21 @@ def nav2_params(ns, bt_xml=None, robot=DEFAULT):
         'lookahead_time': 1.5, 'use_velocity_scaled_lookahead_dist': True,
         'rotate_to_heading_angular_vel': prof['rotate_vel'], 'use_rotate_to_heading': True,
         'rotate_to_heading_min_angle': 1.0, 'max_angular_accel': 3.0,
-        'allow_reversing': False, 'transform_tolerance': 0.3,
+        'allow_reversing': False, 'transform_tolerance': 0.5,
         'min_approach_linear_velocity': 0.08, 'approach_velocity_scaling_dist': 0.5,
         'use_regulated_linear_velocity_scaling': True,
         'regulated_linear_scaling_min_radius': 0.9, 'regulated_linear_scaling_min_speed': prof['min_speed'],
         'use_cost_regulated_linear_velocity_scaling': True,
-        'cost_scaling_dist': 0.5, 'cost_scaling_gain': 1.0, 'inflation_cost_scaling_factor': 3.5,
+        'cost_scaling_dist': 0.5, 'cost_scaling_gain': 1.0, 'inflation_cost_scaling_factor': prof['cost_scaling'],
         # With a rectangular footprint (rover) this check stops the robot whenever its outline
         # touches the inflated band around a wall, i.e. in every doorway and tight room (~40 %
-        # of control cycles); the planner already keeps the whole outline clear.
+        # of control cycles). The planner only keeps the centre clear, so the inflation keeps
+        # paths in the middle (robot_profiles cost_scaling) and wall_guard handles contact.
         'use_collision_detection': prof['footprint'] is None, 'max_allowed_time_to_collision_up_to_carrot': 1.0,
     }
 
     inflation = {'plugin': 'nav2_costmap_2d::InflationLayer',
-                 'cost_scaling_factor': 3.5, 'inflation_radius': prof['inflation']}
+                 'cost_scaling_factor': prof['cost_scaling'], 'inflation_radius': prof['inflation']}
     static = {'plugin': 'nav2_costmap_2d::StaticLayer', 'map_topic': nav_map,
               'map_subscribe_transient_local': True, 'trinary_costmap': False,
               'subscribe_to_updates': False}
@@ -142,9 +147,11 @@ def nav2_params(ns, bt_xml=None, robot=DEFAULT):
                'inflation_layer': inflation})
 
     gc = d['global_costmap']['global_costmap']['ros__parameters']
+    global_plugins = (['static_layer', 'obstacle_layer', 'inflation_layer'] if prof.get('global_scan', True)
+                      else ['static_layer', 'inflation_layer'])
     gc.update({'global_frame': map_frame, 'robot_base_frame': base, **body,
                'track_unknown_space': True, 'update_frequency': 1.0,
-               'plugins': ['static_layer', 'obstacle_layer', 'inflation_layer'],
+               'plugins': global_plugins,
                'static_layer': static, 'obstacle_layer': scan_layer(5.0),
                'inflation_layer': inflation})
 

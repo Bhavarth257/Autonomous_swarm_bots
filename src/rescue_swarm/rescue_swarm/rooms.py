@@ -13,6 +13,11 @@ teammate's unfinished rooms nearest to itself (never the room that teammate is i
 heading to), stamping them with the current time. It only takes from a teammate with at
 least two unfinished rooms, and never a room that changed hands in the last minute:
 otherwise two idle robots hand the last room back and forth.
+
+A teammate that can't search any more (tipped over, stuck, stopped: health.py) loses its
+unfinished rooms straight away, whatever the others are doing: each one goes to the
+healthy robot nearest to it. Every healthy robot works this out from its own view of the
+team, so two may briefly claim the same room; newest wins, as for any entry.
 """
 from __future__ import annotations
 
@@ -86,13 +91,32 @@ class RoomBook:
     def open_rooms(self, robot, done):
         return [k for k, (r, _) in self.book.items() if r == robot and not done[k]]
 
-    def rebalance(self, me, my_pos, busy_points, done, t, settle=60.0):
+    def adopt(self, me, positions, unavailable, done, t):
+        """Take the unfinished rooms of `unavailable` robots that are nearer to me than to
+        any other available robot. positions: {robot: (x, y)} of the robots I know about
+        (including me). Returns the keys taken."""
+        if me in unavailable or me not in positions:
+            return []
+        able = {r: p for r, p in positions.items() if r not in unavailable}
+        taken = []
+        for k in sorted(self.book):
+            owner = self.book[k][0]
+            if owner not in unavailable or owner == me or done[k]:
+                continue
+            cx, cy = centre(self.rooms[k])
+            nearest = min(able, key=lambda r: (math.hypot(able[r][0] - cx, able[r][1] - cy), r))
+            if nearest == me:
+                self.book[k] = [me, t]
+                taken.append(k)
+        return taken
+
+    def rebalance(self, me, my_pos, busy_points, done, t, settle=60.0, unavailable=()):
         """Own rooms all done: take the nearest half (at least one) of the busiest teammate's
         unfinished rooms, except rooms holding one of `busy_points` (teammates' positions
-        and goals). Returns the keys taken."""
-        if self.open_rooms(me, done):
+        and goals). Unavailable teammates are left to adopt(). Returns the keys taken."""
+        if me in unavailable or self.open_rooms(me, done):
             return []
-        loads = {r: self.open_rooms(r, done) for r in self.robots if r != me}
+        loads = {r: self.open_rooms(r, done) for r in self.robots if r != me and r not in unavailable}
         if not loads:
             return []
         busiest = max(loads, key=lambda r: (len(loads[r]), r))

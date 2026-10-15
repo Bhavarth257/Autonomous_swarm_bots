@@ -36,7 +36,7 @@ class WasdTeleop(Node):
         super().__init__('wasd_teleop')
         self.speed = self.declare_parameter('speed', 0.4).value          # m/s
         self.turn = self.declare_parameter('turn_rate', 1.2).value       # rad/s
-        self.splay = 0.6                                                 # wheel-leg stance, rad
+        self.splay = 0.8                                                 # wheel-leg stance, rad
         self.seen = {}                                                   # key -> last time
         self.pub = self.pub_stance = None
         self.select(self.declare_parameter('robot', 'r1').value)
@@ -66,7 +66,7 @@ class WasdTeleop(Node):
         elif k in '123':
             self.select(f'r{k}')
         elif k in 'rf':
-            # R: close the V (stand taller), F: open it (lower, wider; above ~0.65 it can't turn)
+            # R: close the V (stand taller), F: open it (lower, longer; much above 0.8 it can't turn)
             self.splay = min(1.1, max(0.3, self.splay + (-0.1 if k == 'r' else 0.1)))
             self.pub_stance.publish(Float64(data=self.splay))
 

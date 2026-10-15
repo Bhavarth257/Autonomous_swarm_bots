@@ -68,6 +68,7 @@ class TeamView:
         self.poses = {}       # robot -> [x, y, yaw, t]      (world frame)
         self.goals = {}       # robot -> [x, y, t]   (x, y None: no goal)
         self.states = {}      # robot -> [state, t]
+        self.health = {}      # robot -> [health, t]    (health.py: ok / stuck / down)
         self.heard = {}       # robot -> local time we last heard it directly
         self.rect, self.res = rect, res
         self.explored = {me: ExploredGrid(rect, res)}   # per robot, so "others" stays separable
@@ -80,6 +81,9 @@ class TeamView:
         self.goals[self.me] = [*(goal or (None, None)), t]
         self.states[self.me] = [state, t]
 
+    def set_health(self, health, t):
+        self.health[self.me] = [health, t]
+
     def add_own_victims(self, report, t):
         """`report` is the detector's /rN/victims JSON (world_x/world_y used)."""
         for key, tracker in (('victims', self.victims), ('hazards', self.hazards)):
@@ -91,7 +95,7 @@ class TeamView:
     def message(self, t):
         return {
             'from': self.me, 't': t,
-            'poses': self.poses, 'goals': self.goals, 'states': self.states,
+            'poses': self.poses, 'goals': self.goals, 'states': self.states, 'health': self.health,
             'explored': {r: g.encode() for r, g in self.explored.items()},
             'victims': [v.to_dict() for v in self.victims.confirmed()],
             'hazards': [v.to_dict() for v in self.hazards.hazards()],
@@ -100,7 +104,7 @@ class TeamView:
     def receive(self, msg, t):
         self.heard[msg['from']] = t
         for table, incoming in ((self.poses, msg['poses']), (self.goals, msg['goals']),
-                                (self.states, msg['states'])):
+                                (self.states, msg['states']), (self.health, msg.get('health', {}))):
             for r, v in incoming.items():
                 if r != self.me and (r not in table or v[-1] > table[r][-1]):
                     table[r] = v

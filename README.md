@@ -16,6 +16,26 @@ or drop new victims into the running world.
 
 ## Results
 
+**Wheel-leg robot (default), hard 4x4 building** (`grid:=4 difficulty:=hard`, 24 x 20 m,
+smoke, dark rooms, 0.85 m doors, stepped debris), three robots, 15 min limit, one run per
+seed, YOLO on the GPU:
+
+| seed | victims found | false positives | mean error | floor explored | mission time | robots home |
+|---|---|---|---|---|---|---|
+| 2 | 5/6 (3/4 visible, 2/2 buried) | 0 | 0.26 m | 94 % | 14.8 min | 3/3 |
+| 3 | 4/6 (2/4 visible, 2/2 buried) | 0 | 0.34 m | 82 % | 14.7 min | 3/3 |
+| 4 | 5/6 (3/4 visible, 2/2 buried) | 0 | 0.36 m | 100 % | 14.2 min | 3/3 |
+
+Every robot came back before the time limit and no robot tipped over. A later run of
+seed 3 with the controller riding out late SLAM transforms (`failure_tolerance`) found
+5/6 with 0 false positives, but one robot tipped over beside a door jamb on its way
+home (2/3 home); its teammates took over its rooms. Before the wider
+stance, wall guard and home-return fixes the same buildings gave 1-5 victims, 46-100 %
+of the floor and 0-1 robots home. The misses are mostly visible victims in rooms the
+team had not finished when it was time to turn back.
+
+**Earlier robots** (hexapod), for comparison:
+
 Measured on the earlier 3x3-room, normal-difficulty buildings (the default is now 4x4).
 Three robots, 15 min limit, scored against the generator's ground truth by
 `rescue_eval` (each building has 4 visible and 2 buried victims plus one hot decoy;
@@ -50,7 +70,11 @@ scored run to confirm.
 
 Known limitations:
 
-- Getting all three robots back out of a large rubble-filled building in time (see above).
+- The team turns back in time to be out by the limit, so in a large hard building some
+  rooms stay unsearched (the missed victims above). Robots still back away from rubble
+  10-40 times a mission.
+- If the GPU drops out (`CUDA unknown error`, typically after suspend), YOLO runs on the
+  CPU, the simulation slows to ~0.3x real time and SLAM falls behind; see Troubleshooting.
 - A heavily loaded or very hot laptop slows the simulation until odometry arrives too
   late to use and a robot never starts; let it cool down between long runs.
 - Far-away sightings are still placed less accurately than close ones (the camera sits
@@ -189,10 +213,11 @@ A red 0.66 m body on two legs per side. Each side's front and rear leg form a V 
 rocker) on a hub that turns freely, and a differential links the two sides: when one
 rocker tips up, the other tips down, so all four wheels stay on uneven ground and the
 body pitches by only half as much. One motor per side opens or closes the V: a narrow V
-stands tall (body 0.53 m up), a wide one crouches (0.40 m). In missions the robot keeps
-a fixed 0.5 rad stance chosen so its wheelbase is no longer than its track, which skid
-steering needs to turn in place. The legs also level the body sideways on a cross
-slope.
+stands tall (body 0.52 m up), a wide one crouches (0.40 m). In missions the robot keeps
+a fixed 0.8 rad stance: wheels 0.52 m apart front to back and 0.52 m side to side (0.60 m
+wide overall), body 0.43 m up. Skid steering needs the wheelbase no longer than the
+track to turn in place, and the drive spins the wheels 1.8x faster when turning to make
+up for tyre scrub. The legs also level the body sideways on a cross slope.
 
 The `RescueWheelLegDrive` plugin drives the wheels from `cmd_vel` (skid steer), runs the
 stance and levelling, and has two guards: going down a pitch it stops driving further
@@ -200,9 +225,10 @@ downhill, and past a 0.2 rad (11 deg) roll it slows to a crawl and stops turning
 the levelling has the body upright again. `/rN/stance` (`std_msgs/Float64`, rad) changes
 the stance.
 
-Measured (`robot:=wheelleg`): 0.48 m/s cruise, 0.9 rad/s turning in place, climbs 8 cm
-blocks and 10 cm joists (10 cm blocks only half the time), stays level across a 12 deg
-slope and with one side up on an 8 cm plank, fits 0.85 m doors. Worlds made for it use
+Measured (`robot:=wheelleg`): 0.48 m/s cruise, 0.8 rad/s turning in place, climbs
+10 cm blocks and joists with no pitch, stays level across a 12 deg slope and with one
+side up on an 8 cm plank, fits 0.85 m doors. (The first, 0.5 rad stance had the wheels
+only 0.35 m apart under a 0.66 m body: it pitched 17-29 deg over blocks and tipped over.) Worlds made for it use
 debris no higher than 9 cm (`world_climb_max` in `robot_profiles.py`).
 
 Leg-assisted climbing (lifting the front wheels onto a step with the stance motors) was
@@ -224,15 +250,28 @@ and 20 cm mounds over 15 deg ramps without flipping.
 
 ### Mapping and navigation (per robot)
 
-- **SLAM Toolbox** builds the wall map from a 2D scan cut out of the 3D cloud at
-  height band starting above the robots (0.8 m for the wheel-leg robot, 0.4 m for the others), so teammates never end up in the map as walls, and corrects odometry drift.
+- **SLAM Toolbox** builds the wall map from a 2D scan cut out of the 3D cloud in a
+  height band starting above the robots (1.0 m for the wheel-leg robot, 0.4 m for the
+  others), so teammates never end up in the map as walls, and corrects odometry drift.
 - **traversability** keeps a 10 cm height map from the 3D lidar and publishes `nav_map`:
   lethal for walls, anything taller than 40 cm and the top of any step taller than
   14 cm (victims, mound edges); 20-70 for climbable steps so paths prefer flat floor;
   "probably free" where SLAM saw open space but the floor isn't seen yet; lethal
-  outside the building except near the start (geofence).
-- **Nav2**: NavFn A* (may plan through unknown space), Regulated Pure Pursuit at
-  0.35 m/s, spin/back-up recoveries.
+  outside the building except near the start (geofence). Teammates are never walls
+  (their gossiped positions are cleared, 0.9 m around for the wheel-leg robot), and the
+  robot's own path stays walkable for its whole width, so the way home stays open.
+- **Nav2**: NavFn A* (may plan through unknown space), Regulated Pure Pursuit,
+  spin/back-up recoveries. NavFn treats the robot as a point, so for the wheel-leg robot
+  the cost falls off gently away from walls (paths run down the middle of doors and
+  corridors), and its global costmap takes obstacles from `nav_map` only: scan marks far
+  from the robot are never cleared, and a teammate caught in the scan once sealed the
+  entrance for all three robots' trip home.
+- **wall_guard** (wheel-leg robot) sits between Nav2 and the wheels and watches the 3D
+  lidar: steers away from a wall closer than 12 cm to a side (towards the middle in a
+  doorway) and slows down, stops forward motion if something is right ahead, creeps clear
+  of a corner it would hit turning on the spot, and backs off at once if it is pushing
+  against something without moving. The explorer's escape moves, recoveries and teleop
+  bypass it.
 - **explorer**: frontiers of its own map it can actually reach (obstacles grown by the
   robot radius); when those are used up, the edge of what *nobody in the team* has
   seen; blacklists unreachable spots for 90 s; crab-walks away from obstacles when
@@ -269,6 +308,15 @@ is in or heading to, never from a teammate with only one room left, and never a 
 changed hands in the last minute (otherwise two idle robots pass the last room back and
 forth). Take-overs spread by gossip, newest wins. The dashboard's **rooms** layer tints
 each room by owner.
+
+**Robot health.** Each robot judges itself from its own sensors and reports it over the
+radio: **down** if tipped past 60 deg for 5 s, **stuck** if it has been trying to move
+but stayed within 0.5 m for 2 minutes (ok again once it gets 1 m away), else **ok**.
+Silence is not taken as failure; a robot out of range is usually just far away. A
+teammate that is down, stuck or stopped by the operator loses its unfinished rooms at
+once: each goes to the healthy robot nearest to it. The dashboard shows a red DOWN or
+orange STUCK badge on the robot's card and logs the hand-over; the evaluator reports
+each robot's worst health and how many rooms it ended with.
 
 ### Evaluation
 

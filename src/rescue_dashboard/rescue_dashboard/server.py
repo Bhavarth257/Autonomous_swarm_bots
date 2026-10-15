@@ -117,6 +117,7 @@ class Dashboard:
         self.victim_ids = []           # [(x, y, n)] stable numbering
         self.snapshots = {}            # n -> jpeg bytes
         self.last_states = {}
+        self.last_health = {}
         self.history = {'t': [], 'coverage': [], 'victims': [], 'distance': {r: [] for r in robots}}
         self.map_png, self.map_meta, self.map_stamp = None, None, None
         self.map_rendered = -1e9
@@ -151,6 +152,18 @@ class Dashboard:
                 elif room['done']:
                     best[k]['done'] = True
         return list(best.values())
+
+    def health(self, r):
+        """(health, reason) of robot r: its own report, else the newest a teammate relayed."""
+        own = self.node.team.get(r, {})
+        h = own.get('team', {}).get(r, {}).get('health')
+        if h:
+            return h, own.get('health_reason', '')
+        for st in self.node.team.values():
+            h = st.get('team', {}).get(r, {}).get('health')
+            if h:
+                return h, ''
+        return 'ok', ''
 
     def merged(self, key):
         out = []
@@ -198,8 +211,13 @@ class Dashboard:
                 if r in self.last_states:
                     self.log(f'{r}: {self.last_states[r]} → {state} ({st.get("message", "")})', 'robot')
                 self.last_states[r] = state
+            health, reason = self.health(r)
+            if self.last_health.get(r, 'ok') != health:
+                self.log(f'{r}: health {health}' + (f' ({reason})' if reason else '')
+                         + (' — teammates take over its rooms' if health != 'ok' else ''), 'robot')
+            self.last_health[r] = health
             robots[r] = {
-                'state': state, 'message': st.get('message', ''),
+                'state': state, 'message': st.get('message', ''), 'health': health, 'health_reason': reason,
                 'pose': [round(v, 2) for v in pose] if pose else None,
                 'goal': [round(v, 2) for v in goal] if goal else None,
                 'speed': round(n.speed.get(r, 0.0), 2), 'distance': st.get('distance_m', 0),

@@ -239,6 +239,16 @@ class Explorer(Node):
     def on_team(self, msg):
         st = json.loads(msg.data)
         self.team_rooms = st.get('rooms') or []
+        # Tipped over (the swarm agent's health.py): nothing it does helps any more, and the
+        # teammates have taken its rooms. Stop instead of flailing at the rubble.
+        me = st.get('team', {}).get(st.get('robot'), {})
+        if me.get('health') == 'down' and self.state in (EXPLORING, RETURNING):
+            self.cancel_goal()
+            self.escape_cmd = None
+            self.pub_cmd.publish(Twist())
+            self.state = STOPPED
+            self.message = 'tipped over: stopped, teammates take its rooms'
+            self.get_logger().warn(self.message)
         self.team_others = []
         for r, v in st.get('team', {}).items():
             if r == st.get('robot'):

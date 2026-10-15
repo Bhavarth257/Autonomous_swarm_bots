@@ -100,7 +100,7 @@ function buildRobotCards() {
     el.id = `card-${r}`;
     el.innerHTML = `
       <div class="head"><div class="name"><span class="swatch" style="background:${robotColor(r)}"></span>${r}</div>
-        <span class="chip" id="chip-${r}">offline</span></div>
+        <span><span class="chip health" id="health-${r}" hidden></span> <span class="chip" id="chip-${r}">offline</span></span></div>
       <div class="stats">
         <span>position</span><span id="pos-${r}">–</span>
         <span>speed</span><span id="spd-${r}">–</span>
@@ -144,6 +144,14 @@ function updateRobotCards() {
     chip.textContent = s.state;
     chip.style.background = (STATE_COLORS[s.state] || '#484f58') + '33';
     chip.style.color = STATE_COLORS[s.state] || '#c9d1d9';
+    const hb = $(`health-${r}`);
+    const bad = s.health && s.health !== 'ok';
+    hb.hidden = !bad;
+    if (bad) {
+      hb.textContent = s.health;
+      hb.className = `chip health ${s.health}`;
+      hb.title = s.health_reason || '';
+    }
     $(`pos-${r}`).textContent = s.pose ? `${s.pose[0].toFixed(1)}, ${s.pose[1].toFixed(1)} m` : '–';
     $(`spd-${r}`).textContent = `${s.speed.toFixed(2)} m/s`;
     $(`dst-${r}`).textContent = `${s.distance.toFixed(1)} m`;

@@ -22,6 +22,7 @@ setup(
             'traversability = rescue_navigation.traversability:main',
             'explorer = rescue_navigation.explorer:main',
             'teleop = rescue_navigation.wasd_teleop:main',
+            'wall_guard = rescue_navigation.wall_guard:main',
             'wasd_teleop = rescue_navigation.wasd_teleop:main',
         ],
     },

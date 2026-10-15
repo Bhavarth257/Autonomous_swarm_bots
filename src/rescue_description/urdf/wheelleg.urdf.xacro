@@ -17,14 +17,14 @@
   It also turns the wheels to match the legs' motion (otherwise the tyres pin the feet
   and the legs can't move), applies the differential and levels the body from its roll.
 
-  base_link is the body centre, ~0.49 m above the ground at the default 0.5 rad stance.
-  Skid steering only turns while the wheelbase is no longer than the track (0.44 m):
-  above ~0.65 rad (wide stance) it drives straight but can't turn on the spot.
+  base_link is the body centre, ~0.43 m above the ground at the default 0.8 rad stance
+  (wheelbase 0.52 m). Skid steering only turns while the wheelbase is no longer than the
+  track (0.52 m): much above 0.8 rad it drives straight but can't turn on the spot.
 -->
 <robot name="wheelleg" xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:arg name="ns" default="r1"/>
   <xacro:arg name="sensors" default="true"/>
-  <xacro:arg name="stance" default="0.5"/>
+  <xacro:arg name="stance" default="0.8"/>
   <xacro:property name="ns" value="$(arg ns)"/>
 
   <xacro:property name="body_l" value="0.54"/>         <!-- straight section; ends are rounded -->
@@ -35,7 +35,7 @@
   <xacro:property name="leg_l" value="0.36"/>
   <xacro:property name="wheel_r" value="0.14"/>
   <xacro:property name="wheel_w" value="0.08"/>
-  <xacro:property name="wheel_y" value="0.055"/>        <!-- wheel centre outboard of its leg: track 0.44, width 0.52 -->
+  <xacro:property name="wheel_y" value="0.095"/>        <!-- wheel centre outboard of its leg: track 0.52, width 0.60 -->
 
   <material name="red"><color rgba="0.86 0.06 0.05 1"/></material>
   <material name="dark"><color rgba="0.08 0.08 0.09 1"/></material>
@@ -187,7 +187,7 @@
       <body_link>base_link</body_link>
       <leg_length>${leg_l}</leg_length>
       <wheel_radius>${wheel_r}</wheel_radius>
-      <track>${2*(hub_y + wheel_y)}</track>
+      <track>${2*(hub_y + wheel_y) * 1.8}</track>   <!-- x1.8: tyres scrub turning on the spot (measured) -->
       <stance>$(arg stance)</stance>
       <stance_min>0.25</stance_min>
       <stance_max>1.15</stance_max>

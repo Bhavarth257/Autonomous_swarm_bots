@@ -47,3 +47,20 @@ def test_radio_link_model():
     assert not link_ok((1, 1), (8, 1), grid, los_range=12.0, wall_range=4.0)   # wall, 7 m
     assert link_ok((4, 1), (6, 1), grid, los_range=12.0, wall_range=4.0)       # wall, 2 m
     assert not link_ok((0.5, 0.5), (0.5, 9.9), grid, los_range=8.0, wall_range=4.0)  # too far
+
+
+def test_health_spreads_by_gossip_newest_wins():
+    from rescue_swarm.knowledge import TeamView
+    rect = (0.0, 0.0, 10.0, 10.0)
+    a, b, c = TeamView('r1', rect), TeamView('r2', rect), TeamView('r3', rect)
+    a.set_health('down', 5.0)
+    b.receive(a.message(5.0), 5.0)
+    c.receive(b.message(6.0), 6.0)                 # relayed through r2
+    assert c.health['r1'] == ['down', 5.0]
+    a.set_health('ok', 9.0)
+    c.receive(a.message(9.0), 9.0)
+    c.receive(b.message(9.5), 9.5)                 # r2's older news doesn't undo it
+    assert c.health['r1'] == ['ok', 9.0]
+    old = a.message(10.0)
+    del old['health']                              # a robot running older code
+    c.receive(old, 10.0)

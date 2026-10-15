@@ -16,6 +16,7 @@ PROFILES = {
         'footprint': [[0.45, 0.29], [0.45, -0.29], [-0.45, -0.29], [-0.45, 0.29]],
         'robot_radius': None,
         'inflation': 0.75,
+        'cost_scaling': 3.5,            # how fast the cost falls off away from walls
         'cruise': 0.7,
         'min_speed': 0.25,
         'max_vel': [0.8, 0.0, 1.8],     # x, y, yaw for the velocity smoother
@@ -43,6 +44,7 @@ PROFILES = {
         'footprint': None,
         'robot_radius': 0.22,           # the legs (span ~0.53 x 0.58 m) may brush door jambs
         'inflation': 0.7,
+        'cost_scaling': 3.5,
         'cruise': 0.35,                 # below the gait's 0.45 cap so turns stay smooth
         'min_speed': 0.2,
         'max_vel': [0.45, 0.25, 1.8],
@@ -65,8 +67,13 @@ PROFILES['wheelleg'] = dict(
     PROFILES['rover'],
     xacro='wheelleg.urdf.xacro',
     spawn_z=0.6,
-    body_height=0.49,                   # body centre above the ground at the default 0.5 rad stance (measured)
-    footprint=[[0.35, 0.27], [0.35, -0.27], [-0.35, -0.27], [-0.35, 0.27]],   # body 0.66, wheels 0.52 wide
+    body_height=0.43,                   # body centre above the ground at the default 0.8 rad stance
+    footprint=[[0.40, 0.30], [0.40, -0.30], [-0.40, -0.30], [-0.40, 0.30]],   # body 0.66, wheels 0.79 long x 0.60 wide
+    # a gentle fall-off: the cheapest path runs down the middle of doors and corridors
+    # instead of hugging the wall at half a body width (the planner treats the robot as a
+    # point, so corners of the outline swinging round a jamb were scraping)
+    inflation=1.0,
+    cost_scaling=1.8,
     cruise=0.45,                        # tall on a short wheelbase: gentler than the rover
     min_speed=0.2,
     max_vel=[0.6, 0.0, 1.6],
@@ -74,13 +81,24 @@ PROFILES['wheelleg'] = dict(
     blind_radius=1.3,                   # lidar ~0.6 m up sees the floor from ~1.3 m
     self_radius=0.45,
     body_radius=0.55,
-    robot_clearance=0.6,
+    # teammates' corners are 0.5 m from their centre and gossiped positions lag up to
+    # ~0.45 m: a smaller radius left their bodies in the height map as ghosts in doorways
+    robot_clearance=0.9,
     return_speed=0.25,
     teammate_radius=0.4,
-    teammate_height=0.45,
-    scan_min_height=0.80,               # its body sits 0.43-0.55 m up, sensors to ~0.75 m
+    teammate_height=0.40,
+    scan_min_height=1.0,                # sensors reach ~0.70 m, ~0.85 m on a block or seen while pitched:
+                                        # at 0.80 teammates got into the scan and sealed doorways
     stance_topic=True,                  # /<ns>/stance (std_msgs/Float64, rad): V half-angle
-    reach_radius=0.25,                  # 0.85 m doors leave its centre ~0.35 m of slack
+    reach_radius=0.28,                  # 0.85 m doors leave its centre ~0.29 m of slack
+    wall_guard=True,                    # wall_guard.py between Nav2 and the wheels
+    # The global costmap takes obstacles from nav_map only: scan marks far from the robot
+    # never clear (nothing raytraces through them), and a teammate caught in the scan once
+    # sealed the entrance for the trip home. The local costmap still uses the scan.
+    global_scan=False,
+    trail_radius=0.36,                  # own path stays walkable for its whole width (Nav2 keeps the
+                                        # centre 0.30 m from anything lethal)
+    lidar_height=0.54,                  # lidar above the ground (body centre + 0.11)
     step_max=0.10,                      # climbs 8-9 cm reliably, 10 cm about half the time (tested)
     world_climb_max=0.09,               # so its worlds only have debris it can get over
 )

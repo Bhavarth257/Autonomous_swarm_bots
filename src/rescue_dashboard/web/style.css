@@ -163,3 +163,8 @@ kbd { background: var(--panel-2); border: 1px solid var(--line); border-bottom-w
   .chart-panel { height: 200px; }
   .kpis { display: none; }
 }
+
+/* robot health: shown only when a robot can't search (teammates take its rooms) */
+.chip.health.down { background: #f8514933; color: #ff7b72; }
+.chip.health.stuck { background: #d2992233; color: #e3b341; }
+.chip[hidden] { display: none; }

@@ -79,16 +79,30 @@ class Evaluator(Node):
         self.floor = reachable_floor(base)
         self.team, self.status, self.dist, self.last = {}, {}, {r: 0.0 for r in self.robots}, {}
         for r in self.robots:
-            self.create_subscription(String, f'/{r}/team/state',
-                                     lambda m, r=r: self.team.__setitem__(r, json.loads(m.data)), LATCHED)
+            self.create_subscription(String, f'/{r}/team/state', lambda m, r=r: self.on_team(r, m), LATCHED)
             self.create_subscription(String, f'/{r}/mission/status',
                                      lambda m, r=r: self.status.__setitem__(r, json.loads(m.data)), 10)
             self.create_subscription(Odometry, f'/{r}/ground_truth/odom', lambda m, r=r: self.on_gt(r, m), 10)
         # Victims the operator places during the run (dashboard) count too.
         self.create_subscription(String, '/scenario/ground_truth', self.on_truth, LATCHED)
+        # worst health each robot reported about itself (swarm health.py), and when
+        self.health = {r: ['ok', None] for r in self.robots}
+        self.tipped = {}
         self.started = None
         self.finished = False
         self.create_timer(2.0, self.check)
+
+    def on_team(self, r, msg):
+        st = json.loads(msg.data)
+        self.team[r] = st
+        h = st.get('team', {}).get(r, {}).get('health', 'ok')
+        rank = {'ok': 0, 'stuck': 1, 'down': 2}
+        if rank.get(h, 0) > rank.get(self.health[r][0], 0):
+            elapsed = self.status.get(r, {}).get('elapsed_s')
+            self.health[r] = [h, elapsed]
+
+    def health_now(self, r):
+        return self.team.get(r, {}).get('team', {}).get(r, {}).get('health', 'ok')
 
     def on_truth(self, msg):
         self.gt['victims'] = json.loads(msg.data)
@@ -98,6 +112,15 @@ class Evaluator(Node):
 
     def on_gt(self, r, m):
         p = (m.pose.pose.position.x, m.pose.pose.position.y)
+        q = m.pose.pose.orientation
+        roll = math.atan2(2 * (q.w * q.x + q.y * q.z), 1 - 2 * (q.x * q.x + q.y * q.y))
+        pitch = math.asin(max(-1.0, min(1.0, 2 * (q.w * q.y - q.z * q.x))))
+        if r not in self.tipped and max(abs(roll), abs(pitch)) > math.radians(60):
+            # where and when it went over (ground truth), for finding what tips robots
+            self.tipped[r] = {'x': round(p[0], 2), 'y': round(p[1], 2), 'roll_deg': round(math.degrees(roll)),
+                              'pitch_deg': round(math.degrees(pitch)),
+                              'at_s': self.status.get(r, {}).get('elapsed_s')}
+            self.get_logger().warn(f'{r} tipped over at ({p[0]:.1f}, {p[1]:.1f})')
         if r in self.last:
             self.dist[r] += math.hypot(p[0] - self.last[r][0], p[1] - self.last[r][1])
         self.last[r] = p
@@ -107,8 +130,9 @@ class Evaluator(Node):
             return
         if self.started is None and self.status:
             self.started = self.now()
-        states = [self.status.get(r, {}).get('state') for r in self.robots]
-        over = all(s in ('done', 'stopped') for s in states)
+        # a robot that tipped over will never finish: the others decide when it's over
+        over = all(self.status.get(r, {}).get('state') in ('done', 'stopped') or self.health_now(r) == 'down'
+                   for r in self.robots) and any(self.health_now(r) != 'down' for r in self.robots)
         timeout = self.started is not None and self.now() - self.started > self.duration
         if over or timeout:
             self.finished = True
@@ -159,6 +183,10 @@ class Evaluator(Node):
             home = self.last.get(r)
             robots[r] = {'state': st.get('state'), 'distance_m': round(self.dist[r], 1),
                          'explored_m2_own': st.get('explored_m2'),
+                         'worst_health': self.health[r][0], 'worst_health_at_s': self.health[r][1],
+                         'tipped_over': self.tipped.get(r),
+                         'rooms_owned_at_end': sum(1 for room in self.team_view().get('rooms', [])
+                                                   if room.get('owner') == r),
                          'back_at_start': bool(home and math.hypot(home[0] - sp['x'], home[1] - sp['y']) < 1.5)}
         result = {
             'seed': self.seed, 'end': reason,
@@ -201,9 +229,19 @@ def markdown(r):
                      f"{x['confidence']:.2f} | {x['found_by']} | {x['first_seen_s']} |")
     for m in v['missed']:
         lines.append(f"| {m['id']} | {m['kind']} | **missed** | | | | |")
-    lines += ['', '| robot | final state | walked (m) | back at start |', '|---|---|---|---|']
+    lines += ['', '| robot | final state | walked (m) | back at start | worst health | rooms at end |',
+              '|---|---|---|---|---|---|']
     for name, rb in r['robots'].items():
-        lines.append(f"| {name} | {rb['state']} | {rb['distance_m']} | {'yes' if rb['back_at_start'] else 'no'} |")
+        hl = rb.get('worst_health', 'ok')
+        if hl != 'ok' and rb.get('worst_health_at_s') is not None:
+            hl += f" (from {rb['worst_health_at_s']:.0f} s)"
+        lines.append(f"| {name} | {rb['state']} | {rb['distance_m']} | {'yes' if rb['back_at_start'] else 'no'} | "
+                     f"{hl} | {rb.get('rooms_owned_at_end', '')} |")
+    for name, rb in r['robots'].items():
+        tp = rb.get('tipped_over')
+        if tp:
+            lines.append(f"\n{name} tipped over at ({tp['x']}, {tp['y']}) after {tp['at_s']} s "
+                         f"(roll {tp['roll_deg']} deg, pitch {tp['pitch_deg']} deg).")
     return '\n'.join(lines) + '\n'
 
 
