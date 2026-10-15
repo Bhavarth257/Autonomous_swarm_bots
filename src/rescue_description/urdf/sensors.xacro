@@ -1,0 +1,100 @@
+<?xml version="1.0"?>
+<!--
+  Sensors of the wheel-leg rescue robot: 16-ring 3D lidar, RGB camera
+  with a headlight, thermal camera, IMU, and the simulator's ground-truth pose (the odometry
+  node turns it into drifting odometry). The robot defines the links they sit on:
+  lidar_link, camera_link (camera_optical_frame), imu_link.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:macro name="rescue_sensors" params="ns">
+    <gazebo reference="lidar_link">
+      <sensor name="lidar" type="gpu_lidar">
+        <topic>/${ns}/lidar</topic>
+        <ignition_frame_id>${ns}/lidar_link</ignition_frame_id>
+        <update_rate>10</update_rate>
+        <always_on>true</always_on>
+        <visualize>false</visualize>
+        <lidar>
+          <scan>
+            <horizontal><samples>720</samples><resolution>1</resolution>
+              <min_angle>-3.14159</min_angle><max_angle>3.13286</max_angle></horizontal>
+            <vertical><samples>16</samples><resolution>1</resolution>
+              <min_angle>${radians(-25)}</min_angle><max_angle>${radians(15)}</max_angle></vertical>
+          </scan>
+          <range><min>0.40</min><max>15.0</max><resolution>0.01</resolution></range>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.01</stddev></noise>
+        </lidar>
+      </sensor>
+    </gazebo>
+
+    <gazebo reference="camera_link">
+      <sensor name="camera" type="camera">
+        <topic>/${ns}/camera/image_raw</topic>
+        <ignition_frame_id>${ns}/camera_optical_frame</ignition_frame_id>
+        <update_rate>10</update_rate>
+        <always_on>true</always_on>
+        <camera>
+          <horizontal_fov>1.2</horizontal_fov>
+          <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+          <clip><near>0.05</near><far>25</far></clip>
+          <noise><type>gaussian</type><mean>0.0</mean><stddev>0.005</stddev></noise>
+        </camera>
+      </sensor>
+    </gazebo>
+
+    <!-- Headlight in the sensor head: dark rooms under a collapsed roof stay visible to the
+         camera within a few metres (the thermal camera doesn't need light). -->
+    <gazebo reference="camera_link">
+      <light name="headlight" type="spot">
+        <pose>0.02 0 0 0 0 0</pose>
+        <diffuse>0.55 0.53 0.5 1</diffuse>
+        <specular>0.05 0.05 0.05 1</specular>
+        <attenuation><range>7</range><constant>0.8</constant><linear>0.15</linear><quadratic>0.04</quadratic></attenuation>
+        <spot><inner_angle>0.5</inner_angle><outer_angle>0.9</outer_angle><falloff>1.0</falloff></spot>
+        <cast_shadows>false</cast_shadows>
+        <direction>1 0 0</direction>      <!-- along the camera link's forward axis -->
+      </light>
+    </gazebo>
+
+    <!-- Thermal camera next to the RGB one (same optical frame). Pixels are temperatures
+         in kelvin x 100 (16 bit): skin ~309 K, debris warmed by a buried body ~303 K,
+         ambient 293 K, smouldering debris 330+ K. -->
+    <gazebo reference="camera_link">
+      <sensor name="thermal" type="thermal">
+        <topic>/${ns}/thermal/image_raw</topic>
+        <ignition_frame_id>${ns}/camera_optical_frame</ignition_frame_id>
+        <update_rate>5</update_rate>
+        <always_on>true</always_on>
+        <camera>
+          <horizontal_fov>1.2</horizontal_fov>
+          <image><width>320</width><height>240</height><format>L16</format></image>
+          <clip><near>0.1</near><far>20</far></clip>
+        </camera>
+      </sensor>
+    </gazebo>
+
+    <gazebo reference="imu_link">
+      <sensor name="imu" type="imu">
+        <topic>/${ns}/imu</topic>
+        <ignition_frame_id>${ns}/imu_link</ignition_frame_id>
+        <update_rate>50</update_rate>
+        <always_on>true</always_on>
+      </sensor>
+    </gazebo>
+  </xacro:macro>
+
+  <xacro:macro name="ground_truth_odom" params="ns">
+    <gazebo>
+      <!-- Ground-truth pose; wheelleg_odom turns it into drifting odometry. -->
+      <plugin filename="ignition-gazebo-odometry-publisher-system"
+              name="ignition::gazebo::systems::OdometryPublisher">
+        <dimensions>3</dimensions>
+        <odom_frame>${ns}/gt_odom</odom_frame>
+        <robot_base_frame>${ns}/gt_base_link</robot_base_frame>
+        <odom_topic>/${ns}/ground_truth/odom</odom_topic>
+        <tf_topic>/${ns}/ground_truth/tf</tf_topic>
+        <odom_publish_frequency>50</odom_publish_frequency>
+      </plugin>
+    </gazebo>
+  </xacro:macro>
+</robot>

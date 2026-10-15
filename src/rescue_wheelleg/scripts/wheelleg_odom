@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Odometry for the wheel-leg robot.
+
+A real robot estimates its motion from wheel encoders and an IMU: roll, pitch and
+body height are accurate; x and y come from the wheels and drift (wheel slip on rubble,
+wheel-radius error); yaw comes from the gyro, whose bias is measured while the robot
+stands still before the mission, so only a small residual bias and scale error remain
+(skid-steer wheel yaw slips badly in turns). This node reproduces that from the
+simulator's ground-truth pose:
+
+  in   ground_truth/odom                       (Gazebo OdometryPublisher, 3D)
+  out  odom                                    nav_msgs/Odometry, odom -> base_footprint
+       TF <ns>/odom -> <ns>/base_footprint     gravity-aligned: x y z yaw (drifting)
+       TF <ns>/base_footprint -> <ns>/base_link   roll, pitch, body height (accurate)
+       odom/tilt  geometry_msgs/QuaternionStamped: the same roll/pitch with the odometry
+                  stamp, for nodes that need the body attitude at an exact time
+
+Odometry starts at zero where the robot spawns.
+"""
+import math
+import random
+import zlib
+
+import rclpy
+from geometry_msgs.msg import QuaternionStamped, TransformStamped
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from tf2_ros import TransformBroadcaster
+
+
+def quat_to_rpy(q):
+    roll = math.atan2(2 * (q.w * q.x + q.y * q.z), 1 - 2 * (q.x * q.x + q.y * q.y))
+    pitch = math.asin(max(-1.0, min(1.0, 2 * (q.w * q.y - q.z * q.x))))
+    yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+    return roll, pitch, yaw
+
+
+def rpy_to_quat(roll, pitch, yaw):
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    return (sr * cp * cy - cr * sp * sy, cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy, cr * cp * cy + sr * sp * sy)
+
+
+def wrap(a):
+    return math.atan2(math.sin(a), math.cos(a))
+
+
+class WheelLegOdom(Node):
+    def __init__(self):
+        super().__init__('wheelleg_odom')
+        ns = self.get_namespace().strip('/')
+        self.prefix = f'{ns}/' if ns else ''
+        self.body_height = self.declare_parameter('body_height', 0.43).value
+        drift = self.declare_parameter('drift', True).value
+        # Deterministic per robot name, so runs are repeatable.
+        rng = random.Random(self.declare_parameter('seed', zlib.crc32(ns.encode())).value)
+        # Fixed per-robot errors (calibration) plus per-step noise.
+        self.scale = 1.0 + (rng.gauss(0, 0.02) if drift else 0.0)
+        # Gyro after the standstill calibration: ~0.3 % scale error, ~0.02 deg/s residual
+        # bias (it was 1.5 % and 0.15 deg/s uncalibrated: 9 deg a minute, which SLAM can't
+        # correct while a robot stands still, so its map came out rotated once it moved).
+        self.yaw_scale = 1.0 + (rng.gauss(0, 0.003) if drift else 0.0)
+        self.gyro_bias = rng.gauss(0, math.radians(0.02)) if drift else 0.0   # rad/s
+        self.step_noise = 0.01 if drift else 0.0     # m per m travelled
+        self.rng = rng
+
+        self.ref = None        # first ground-truth planar pose
+        self.prev = None       # previous ground-truth planar pose (relative)
+        self.prev_t = None
+        self.est = [0.0, 0.0, 0.0]
+
+        self.tf = TransformBroadcaster(self)
+        self.pub = self.create_publisher(Odometry, 'odom', 20)
+        self.pub_tilt = self.create_publisher(QuaternionStamped, 'odom/tilt', 20)
+        self.create_subscription(Odometry, 'ground_truth/odom', self.on_gt, 20)
+
+    def on_gt(self, msg: Odometry):
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        roll, pitch, yaw = quat_to_rpy(q)
+        t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.ref is None:
+            self.ref = (p.x, p.y, yaw)
+        x0, y0, yaw0 = self.ref
+        c, s = math.cos(-yaw0), math.sin(-yaw0)
+        gt = (c * (p.x - x0) - s * (p.y - y0), s * (p.x - x0) + c * (p.y - y0), wrap(yaw - yaw0))
+
+        if self.prev is not None:
+            dt = max(0.0, t - self.prev_t)
+            px, py, pyaw = self.prev
+            cb, sb = math.cos(-pyaw), math.sin(-pyaw)
+            dx = cb * (gt[0] - px) - sb * (gt[1] - py)     # motion in the previous body frame
+            dy = sb * (gt[0] - px) + cb * (gt[1] - py)
+            dyaw = wrap(gt[2] - pyaw)
+            dist = math.hypot(dx, dy)
+            dx = dx * self.scale + self.rng.gauss(0, self.step_noise * dist)
+            dy = dy * self.scale + self.rng.gauss(0, self.step_noise * dist)
+            dyaw = dyaw * self.yaw_scale + self.gyro_bias * dt
+            ex, ey, eyaw = self.est
+            self.est = [ex + math.cos(eyaw) * dx - math.sin(eyaw) * dy,
+                        ey + math.sin(eyaw) * dx + math.cos(eyaw) * dy,
+                        wrap(eyaw + dyaw)]
+        self.prev, self.prev_t = gt, t
+
+        stamp = msg.header.stamp
+        ex, ey, eyaw = self.est
+        ground_z = p.z - self.body_height
+
+        odom_tf = TransformStamped()
+        odom_tf.header.stamp = stamp
+        odom_tf.header.frame_id = f'{self.prefix}odom'
+        odom_tf.child_frame_id = f'{self.prefix}base_footprint'
+        odom_tf.transform.translation.x, odom_tf.transform.translation.y = ex, ey
+        odom_tf.transform.translation.z = ground_z
+        (odom_tf.transform.rotation.x, odom_tf.transform.rotation.y,
+         odom_tf.transform.rotation.z, odom_tf.transform.rotation.w) = rpy_to_quat(0, 0, eyaw)
+
+        tilt_tf = TransformStamped()
+        tilt_tf.header.stamp = stamp
+        tilt_tf.header.frame_id = f'{self.prefix}base_footprint'
+        tilt_tf.child_frame_id = f'{self.prefix}base_link'
+        tilt_tf.transform.translation.z = self.body_height
+        (tilt_tf.transform.rotation.x, tilt_tf.transform.rotation.y,
+         tilt_tf.transform.rotation.z, tilt_tf.transform.rotation.w) = rpy_to_quat(roll, pitch, 0)
+        self.tf.sendTransform([odom_tf, tilt_tf])
+
+        out = Odometry()
+        out.header.stamp = stamp
+        out.header.frame_id = odom_tf.header.frame_id
+        out.child_frame_id = odom_tf.child_frame_id
+        out.pose.pose.position.x, out.pose.pose.position.y, out.pose.pose.position.z = ex, ey, ground_z
+        out.pose.pose.orientation = odom_tf.transform.rotation
+        out.twist.twist.linear.x = msg.twist.twist.linear.x * self.scale
+        out.twist.twist.linear.y = msg.twist.twist.linear.y * self.scale
+        out.twist.twist.angular.z = msg.twist.twist.angular.z * self.yaw_scale
+        for i, var in enumerate((0.02, 0.02, 0.01, 0.005, 0.005, 0.03)):
+            out.pose.covariance[i * 7] = var
+            out.twist.covariance[i * 7] = var
+        self.pub.publish(out)
+        tilt = QuaternionStamped()
+        tilt.header.stamp = stamp
+        tilt.header.frame_id = tilt_tf.header.frame_id
+        tilt.quaternion = tilt_tf.transform.rotation
+        self.pub_tilt.publish(tilt)
+
+
+def main():
+    rclpy.init()
+    node = WheelLegOdom()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+
+
+if __name__ == '__main__':
+    main()

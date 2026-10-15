@@ -1,0 +1,146 @@
+"""Who searches which room: an initial split of the building's rooms between the robots,
+and taking rooms over from the busiest teammate once one's own are done. Pure Python.
+
+The rescuers' plan gives the building outline and its grid of rooms. Every robot computes
+the same initial split from it, so they agree before saying a word: rooms are ordered by
+their bearing from the entrance (left to right as you walk in) and cut into one
+contiguous, equal-sized group per robot, r1 taking the leftmost (it starts leftmost).
+
+Each entry of the book is [owner, t]; books merge entry by entry, newest wins, so a
+take-over spreads by gossip like everything else. A room is done once enough of it is
+explored by anyone and no robot has an open frontier left in it. A robot whose own rooms
+are all done takes the half of the busiest
+teammate's unfinished rooms nearest to itself (never the room that teammate is in or
+heading to), stamping them with the current time. It only takes from a teammate with at
+least two unfinished rooms, and never a room that changed hands in the last minute:
+otherwise two idle robots hand the last room back and forth.
+
+A teammate that can't search any more (tipped over, stuck, stopped: health.py) loses its
+unfinished rooms straight away, whatever the others are doing: each one goes to the
+healthy robot nearest to it. Every healthy robot works this out from its own view of the
+team, so two may briefly claim the same room; newest wins, as for any entry.
+"""
+from __future__ import annotations
+
+import math
+
+# Done = explored this far by anyone AND no robot reports an open frontier in it. Explored
+# alone isn't enough: the lidar sees most of a room through its door long before anyone has
+# searched it (rooms were "done" within 5 min of a 11 min mission).
+DONE_FRACTION = 0.9
+
+
+def room_key(i, j):
+    return f'{i},{j}'
+
+
+def room_rects(rect, cols, rows):
+    """{key: (x0, y0, x1, y1)} for a cols x rows grid over the building rectangle."""
+    x0, y0, x1, y1 = rect
+    w, h = (x1 - x0) / cols, (y1 - y0) / rows
+    return {room_key(i, j): (x0 + i * w, y0 + j * h, x0 + (i + 1) * w, y0 + (j + 1) * h)
+            for i in range(cols) for j in range(rows)}
+
+
+def room_at(rooms, x, y):
+    for k, (x0, y0, x1, y1) in rooms.items():
+        if x0 <= x < x1 and y0 <= y < y1:
+            return k
+    return None
+
+
+def centre(r):
+    return (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
+
+
+def initial_split(rooms, robots, entrance):
+    """{room key: robot}: rooms by bearing from the entrance, left to right, cut evenly."""
+    ex, ey = entrance
+
+    def bearing(k):
+        cx, cy = centre(rooms[k])
+        # angle measured from "straight in" (+y) towards the left (-x): left rooms first
+        return math.atan2(-(cx - ex), cy - ey), math.hypot(cx - ex, cy - ey)
+
+    order = sorted(rooms, key=bearing, reverse=True)
+    n = len(robots)
+    return {k: robots[min(n - 1, idx * n // len(order))] for idx, k in enumerate(order)}
+
+
+class RoomBook:
+    def __init__(self, rooms, robots, entrance):
+        self.rooms = rooms
+        self.robots = list(robots)
+        self.book = {k: [r, 0.0] for k, r in initial_split(rooms, robots, entrance).items()}
+        self.finished = set()       # done stays done (no flicker when a stray frontier appears)
+
+    def owner(self, key):
+        e = self.book.get(key)
+        return e[0] if e else None
+
+    def owner_at(self, x, y):
+        return self.owner(room_at(self.rooms, x, y))
+
+    def message(self):
+        return {k: list(v) for k, v in self.book.items()}
+
+    def merge(self, other):
+        for k, (r, t) in other.items():
+            if k in self.book and t > self.book[k][1]:
+                self.book[k] = [r, t]
+
+    def done(self, explored, open_frontiers=None):
+        """{key: bool}; explored(x0, y0, x1, y1) -> fraction of that rectangle explored;
+        open_frontiers: {key: frontiers some robot still has there}."""
+        open_frontiers = open_frontiers or {}
+        for k, r in self.rooms.items():
+            if k not in self.finished and explored(*r) >= DONE_FRACTION and not open_frontiers.get(k):
+                self.finished.add(k)
+        return {k: k in self.finished for k in self.rooms}
+
+    def open_rooms(self, robot, done):
+        return [k for k, (r, _) in self.book.items() if r == robot and not done[k]]
+
+    def adopt(self, me, positions, unavailable, done, t):
+        """Take the unfinished rooms of `unavailable` robots that are nearer to me than to
+        any other available robot. positions: {robot: (x, y)} of the robots I know about
+        (including me). Returns the keys taken."""
+        if me in unavailable or me not in positions:
+            return []
+        able = {r: p for r, p in positions.items() if r not in unavailable}
+        taken = []
+        for k in sorted(self.book):
+            owner = self.book[k][0]
+            if owner not in unavailable or owner == me or done[k]:
+                continue
+            cx, cy = centre(self.rooms[k])
+            nearest = min(able, key=lambda r: (math.hypot(able[r][0] - cx, able[r][1] - cy), r))
+            if nearest == me:
+                self.book[k] = [me, t]
+                taken.append(k)
+        return taken
+
+    def rebalance(self, me, my_pos, busy_points, done, t, settle=60.0, unavailable=()):
+        """Own rooms all done: take the nearest half (at least one) of the busiest teammate's
+        unfinished rooms, except rooms holding one of `busy_points` (teammates' positions
+        and goals). Unavailable teammates are left to adopt(). Returns the keys taken."""
+        if me in unavailable or self.open_rooms(me, done):
+            return []
+        loads = {r: self.open_rooms(r, done) for r in self.robots if r != me and r not in unavailable}
+        if not loads:
+            return []
+        busiest = max(loads, key=lambda r: (len(loads[r]), r))
+        if len(loads[busiest]) < 2:
+            return []                     # one room left: let its owner finish it
+        busy = {room_at(self.rooms, x, y) for x, y in busy_points}
+        candidates = [k for k in loads[busiest]
+                      if k not in busy and (self.book[k][1] == 0.0 or t - self.book[k][1] > settle)]
+        if not candidates:
+            return []
+        n = max(1, len(loads[busiest]) // 2)
+        candidates.sort(key=lambda k: math.hypot(centre(self.rooms[k])[0] - my_pos[0],
+                                                 centre(self.rooms[k])[1] - my_pos[1]))
+        taken = candidates[:n]
+        for k in taken:
+            self.book[k] = [me, t]
+        return taken

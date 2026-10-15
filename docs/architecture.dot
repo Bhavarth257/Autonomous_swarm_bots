@@ -1,0 +1,89 @@
+// Rescue swarm architecture.
+// Render: dot -Tsvg docs/architecture.dot -o docs/architecture.svg
+
+digraph architecture {
+  graph [rankdir=TB, bgcolor="white", fontname="Helvetica", fontsize=12, nodesep=0.45, ranksep=0.6,
+         pad=0.3, newrank=true, compound=true, splines=true];
+  node  [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10.5, fillcolor="white",
+         color="#8b949e", penwidth=1.0, margin="0.14,0.07", width=2.1];
+  edge  [fontname="Helvetica", fontsize=9, color="#57606a", arrowsize=0.7, fontcolor="#24292f"];
+
+  // ------------------------------------------------------------------ 1. simulation
+  subgraph cluster_sim {
+    label=<<b>Simulation: Gazebo Fortress</b>   (one world, every robot in it)>; labeljust=l;
+    style="rounded,filled"; fillcolor="#fff1e6"; color="#f0a868"; fontcolor="#9a4a00";
+    world   [label=<<b>rescue_world</b><br/><font point-size="9">seeded building SDF<br/>+ ground-truth JSON</font>>, fillcolor="#fffaf5"];
+    sensors [label=<<b>Robot sensors</b><br/><font point-size="9">16-ring 3D lidar · RGB · thermal<br/>IMU · ground-truth pose</font>>, fillcolor="#fffaf5"];
+    plugin  [label=<<b>Drive plugin</b><br/><font point-size="9">RescueWheelLegDrive<br/>skid steer · stance · levelling</font>>, fillcolor="#fffaf5"];
+    { rank=same; world; sensors; plugin; }
+  }
+
+  bridge [label=<<b>ros_gz_bridge</b>   <font point-size="9">ignition msgs ⇄ ROS 2 topics, per robot /rN/…</font>>,
+          fillcolor="#f6f8fa", width=6.5];
+
+  // ------------------------------------------------------------------ 2. per robot
+  subgraph cluster_robot {
+    label=<<b>Per robot rN</b>   (own namespace and TF prefix; one stack per robot, ×1-3)>; labeljust=l;
+    style="rounded,filled"; fillcolor="#e8f0fe"; color="#7aa7e8"; fontcolor="#1f4e9a";
+    odom    [label=<<b>wheelleg_odom</b><br/><font point-size="9">drifting odometry</font>>];
+    slam    [label=<<b>SLAM Toolbox</b><br/><font point-size="9">2D scan → map</font>>];
+    trav    [label=<<b>traversability</b><br/><font point-size="9">height map + SLAM<br/>+ geofence → nav_map</font>>];
+    nav2    [label=<<b>Nav2</b><br/><font point-size="9">NavFn A* · pure pursuit<br/>velocity smoother</font>>];
+    guard   [label=<<b>wall_guard</b><br/><font point-size="9">lidar safety layer</font>>];
+    explorer[label=<<b>explorer</b><br/><font point-size="9">mission state machine<br/>frontiers · own rooms first</font>>,
+             fillcolor="#d3e2fd", penwidth=1.5, color="#4a7bd0"];
+    agent   [label=<<b>swarm_agent</b><br/><font point-size="9">team view · room book<br/>robot health · gossip 1 Hz</font>>,
+             fillcolor="#d3e2fd", penwidth=1.5, color="#4a7bd0"];
+    { rank=same; odom; slam; trav; nav2; guard; }
+    { rank=same; explorer; agent; }
+  }
+
+  // ------------------------------------------------------------------ 3. shared
+  subgraph cluster_shared {
+    label=<<b>Shared nodes</b>   (one for the whole team)>; labeljust=l;
+    style="rounded,filled"; fillcolor="#f3eefc"; color="#a98bd8"; fontcolor="#5b3a99";
+    detector[label=<<b>victim_detector</b><br/><font point-size="9">YOLOv8 on GPU + thermal blobs<br/>lidar placement · per-robot tracks</font>>];
+    radio   [label=<<b>radio</b><br/><font point-size="9">who hears whom: 25 m line of sight<br/>8 m through walls</font>>];
+    eval    [label=<<b>evaluate</b><br/><font point-size="9">scores against ground truth<br/>(evaluate:=true)</font>>, style="rounded,filled,dashed"];
+    { rank=same; detector; radio; eval; }
+  }
+
+  // ------------------------------------------------------------------ 4. operator
+  subgraph cluster_op {
+    label=<<b>Operator</b>>; labeljust=l;
+    style="rounded,filled"; fillcolor="#eaf7ec"; color="#7cc28a"; fontcolor="#1d6b2f";
+    dash    [label=<<b>dashboard</b><br/><font point-size="9">aiohttp server + ROS 2 node</font>>];
+    browser [label=<<b>Browser</b>  localhost:8080<br/><font point-size="9">map · rooms · cameras<br/>take over · place victims</font>>, fillcolor="#f6fff7"];
+    teleop  [label=<<b>teleop</b><br/><font point-size="9">arrow keys → /rN/cmd_vel<br/>R/F → /rN/stance</font>>, style="rounded,filled,dashed"];
+    reports [label=<<b>~/rescue_reports</b><br/><font point-size="9">mission and evaluation reports</font>>, shape=note, fillcolor="#fffef0"];
+    { rank=same; teleop; dash; reports; }
+  }
+
+  // ------------------------------------------------------------------ edges
+  sensors -> bridge  [label=" lidar · images · IMU · gt pose"];
+  plugin  -> bridge  [dir=back, label=" cmd_vel · stance"];
+  world   -> bridge  [style=invis];
+
+  bridge  -> odom    [label=" ground-truth pose"];
+  bridge  -> trav    [label=" lidar/points"];
+  odom    -> slam    [label="odom"];
+  slam    -> trav    [label="map"];
+  trav    -> nav2    [label="nav_map"];
+  nav2    -> guard   [label="cmd_vel_raw"];
+  guard   -> bridge  [label=" cmd_vel", constraint=false];
+
+  trav    -> explorer[label=" nav_map", style=dashed];
+  explorer-> nav2    [label=" navigate_to_pose"];
+  explorer-> agent   [label=" mission/status"];
+  agent   -> explorer[label=" team/state"];
+
+  bridge  -> detector[label=" camera · thermal · lidar", style=dashed];
+  detector-> agent   [label=" rN/victims"];
+  agent   -> radio   [label=" radio/out"];
+  radio   -> agent   [label=" radio/in"];
+  agent   -> eval    [label=" team/state", style=dashed];
+
+  agent   -> dash    [label=" team/state · mission/status", lhead=cluster_op];
+  dash    -> browser [label="WebSocket (state 4 Hz)\nMJPEG cameras", dir=both];
+  eval    -> reports [label=" report .md / .json", style=dashed];
+}
