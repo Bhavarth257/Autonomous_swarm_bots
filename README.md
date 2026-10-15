@@ -25,7 +25,8 @@ drop new victims into the running world.
 
 **Contents:** [Quick start](#quick-start) · [The robots](#the-robots) ·
 [Wheel-leg robot](#wheel-leg-robot) · [Hexapod](#hexapod) · [Results](#results) ·
-[Mission control](#mission-control) · [How it works](#how-it-works) ·
+[Mission control](#mission-control) · [Architecture](#architecture) ·
+[How the code works](#how-the-code-works) ·
 [Testing](#testing) · [Setup details](#setup-details) · [Troubleshooting](#troubleshooting) ·
 [Topics and frames](#topics-and-frames)
 
@@ -321,111 +322,334 @@ The robots are autonomous; everything here is optional.
 The page also works from another computer on your network (http://<this-pc>:8080).
 Anyone who can open it can drive the robots.
 
-## How it works
+## Architecture
 
-```
-                 Gazebo Fortress (physics, 3D lidar, RGB + thermal cameras)
-                                       │
-   per robot rN ───────────────────────┼───────────────────────────────────────────────
-   drive / gait plugin ◄─ cmd_vel ─ [wall_guard] ◄─ Nav2 (NavFn A*, Regulated Pure Pursuit)
-   odometry (drifting)                                     ▲ nav_map
-   SLAM Toolbox (2D) ── map ──► traversability ────────────┘ (height map + SLAM + geofence)
-   explorer (frontiers, own rooms first) ◄── team/state ── swarm_agent ◄─► radio ◄─► teammates
-   ──────────────────────────────────────────────────────────────────────────────────────
-   shared: victim_detector (YOLOv8 + thermal + lidar placement)   radio channel
-           dashboard   evaluator
-```
+![architecture](docs/architecture.svg)
+
+The system has four layers:
+
+- **Simulation:** one Gazebo world holds every robot. Each robot's Gazebo plugin moves
+  its joints, and the `ros_gz_bridge` turns Gazebo messages into ROS 2 topics under
+  `/rN/…`.
+- **Per robot:** the blue box runs once for every robot, in its own namespace with its
+  own TF prefix. Nothing in it talks to a teammate directly; everything a robot learns
+  about the team comes through its `swarm_agent`.
+- **Shared nodes:** these serve the whole team:
+  - the victim detector (one YOLO model on the GPU, with separate outputs per robot);
+  - the radio channel;
+  - the evaluator.
+- **Operator:** the web dashboard and keyboard teleop.
+
+Dashed boxes are optional or robot-specific. The source of the picture is
+[docs/architecture.dot](docs/architecture.dot).
 
 | Package | What it does |
 |---|---|
-| `rescue_world` | Seeded building generator. Rooms, doors (some buried in rubble), breaches, climbable and blocking debris, Rescue Randy victims (some buried under warm debris) and a hot decoy. `hard` adds 0.85 m doors, stepped debris, smoke (blinds the RGB camera, not thermal or lidar) and dark rooms. Writes the SDF world and the ground truth. |
+| `rescue_world` | Seeded building generator: rooms, doors, debris, victims, smoke and dark rooms. Writes the SDF world and the ground truth. |
 | `rescue_description` | Robot URDFs (wheel-leg, hexapod, rover), each with a 16-ring 3D lidar, RGB and thermal cameras and an IMU. |
 | `rescue_hexabot` | Gazebo plugins `RescueWheelLegDrive` and `HexWalk`, the odometry node, and the localhost FastDDS profile. |
 | `rescue_navigation` | `traversability`, `explorer`, `wall_guard`, SLAM/Nav2 configuration, `robot_profiles`, keyboard `teleop`. |
-| `rescue_perception` | `victim_detector`: YOLOv8 persons and thermal body blobs, placed with lidar and the floor plane, fused into victims. |
+| `rescue_perception` | `victim_detector`: YOLOv8 persons and thermal body blobs, placed with lidar, fused into victims. |
 | `rescue_swarm` | `radio` (simulated channel), `swarm_agent` (gossip), `rooms` (room split), `health` (ok / stuck / down). |
 | `rescue_dashboard` | Web mission control. |
 | `rescue_eval` | `evaluate` (scores one mission) and `run_batch` (many seeds headless). |
 | `rescue_bringup` | `mission.launch.py` (everything) and `sim.launch.py` (world and robots only). |
 
-### Mapping and navigation (per robot)
+## How the code works
 
-- **SLAM Toolbox** builds the wall map from a 2D scan cut out of the 3D cloud, and
-  corrects odometry drift. The scan only uses a height band above the robots (from
-  1.0 m for the wheel-leg robot, 0.4 m for the others), so teammates never become walls.
-- **traversability** keeps a 10 cm height map from the 3D lidar and publishes `nav_map`:
-  - walls, tall obstacles and steps higher than the robot can climb are lethal;
-  - climbable steps get a cost, so paths prefer flat floor;
-  - space SLAM saw as open but the lidar hasn't seen the floor of yet is "probably free";
-  - outside the building is lethal, except near the start (geofence);
-  - teammates are never obstacles, and the robot's own path stays walkable.
-- **Nav2:**
-  - NavFn A*, which may plan through unknown space;
-  - Regulated Pure Pursuit, which rides out up to 1 s of late SLAM transforms instead of
-    dropping the path;
-  - spin and back-up recoveries;
-  - the explorer configures and activates Nav2 itself and restarts it if bringup fails.
-- **explorer:**
-  - picks frontiers it can actually reach, scored by what it would reveal against the
-    walking distance;
-  - **own rooms first**, strictly; a teammate's room only when nothing else is left;
-  - keeps away from teammates and their goals;
-  - blacklists unreachable spots for 90 s and backs out when stuck;
-  - turns back early enough to be home by the time limit.
+### 1. World generation: `rescue_world/`
 
-### Victim detection
+```mermaid
+flowchart LR
+    A["launch args<br/>seed · grid · difficulty<br/>robot climb height"] --> B["layout.py<br/>generate_layout()"]
+    V["victims_file<br/>(optional JSON)"] --> B
+    B --> C["sdf_writer.py"]
+    B --> D["maps"]
+    C --> E["rescue_&lt;seed&gt;_c&lt;cm&gt;.sdf<br/>Gazebo world"]
+    D --> F[".json ground truth<br/>victims · decoy · spawns · entrance"]
+    D --> G["_map.pgm / .yaml<br/>true occupancy"]
+    D --> H["_preview.png<br/>top-down picture"]
+```
 
-- **YOLOv8n** (COCO "person") on the RGB camera, on the GPU, one model shared by the team.
-- **Thermal camera** (16-bit centi-kelvin):
-  - blobs at 28-45 C are body heat, or debris warmed by a buried body;
-  - above 52 C is a hazard (fire), never a victim.
-- **Placement:**
-  - the bottom of the detection box is where the body meets the floor;
-  - the ray through it meets the floor plane, and lidar points at that distance refine
-    the position;
-  - teammates in view are rejected.
-- **Fusion:**
-  - **visible** = YOLO saw a person;
-  - **buried** = body heat seen repeatedly from 2+ places with no person visible;
-  - confidence grows with sightings and viewpoints.
+- **Same seed, same building.** The generator is pure geometry with no ROS, so it is fast
+  and unit-tested.
+- **Layout:**
+  - the building is a grid of rooms with doors, some of them buried in rubble, and
+    breaches in the walls;
+  - debris comes in two kinds: **climbable** (low blocks, beams, gravel, ramped mounds)
+    and **blocking** (walls, tall piles, slabs);
+  - the robot's climb height caps the climbable debris, so the wheel-leg robot gets
+    rubble no higher than 9 cm.
+- **Victims:** Rescue Randy models lying or sitting; some are buried under warm debris.
+  There is also one hot decoy, a fire.
+- **`hard`** adds 0.85 m doors, stepped debris, smoke rooms (they blind the RGB camera,
+  not thermal or lidar) and dark rooms under a collapsed roof.
 
-### Swarm
+| output | used by |
+|---|---|
+| `.sdf` | Gazebo |
+| `.json` | robots get the building outline, entrance and start poses (the rescuers' plan); the radio, the dashboard and the evaluator get the rest |
+| `_map.pgm` | the radio (line of sight) and the evaluator (free floor for coverage) |
+| `_preview.png` | you |
 
-No robot is in charge.
+### 2. Robot motion: `rescue_hexabot/`
 
-**Radio.** The `radio` node models the channel: robots hear each other within 25 m with
-line of sight, or 8 m through walls. Each `swarm_agent` broadcasts its view of the team
-once a second and merges what it hears, newest entry winning. News therefore travels
-through teammates:
-- positions, goals and mission states;
-- a 0.5 m explored grid per robot;
-- victims;
-- the room book, each robot's health, and its open frontiers per room.
+Both plugins take `/rN/cmd_vel` and command joint **velocities**. Gazebo's physics then
+does the actual driving or walking, so contacts, slip and tipping are real.
 
-**Rooms.**
-- **Initial split:** every robot computes the same split from the building plan without
-  talking. Rooms are ordered by bearing from the entrance, left to right, and cut into
-  one equal group per robot.
-- **Ownership:** a room stays with its owner until it is handed over. Explorers take
-  frontiers in their own rooms first; driving *through* other rooms is fine.
-- **Done:** a room is done when 90 % of it has been seen by anyone **and** no robot
-  reports an open frontier in it. Done is sticky: it doesn't reopen.
-- **Helping out:** a robot whose rooms are all done takes the nearest half of the
-  busiest teammate's unfinished rooms. To stop two idle robots passing the last room back
-  and forth, it never takes:
-  - the room that teammate is in or heading to;
-  - from a teammate with only one room left;
-  - a room that changed hands in the last minute.
+```mermaid
+flowchart TB
+    subgraph WL["RescueWheelLegDrive (wheel-leg)"]
+        direction LR
+        c1["cmd_vel<br/>vx, wz"] --> g1{"tipped? roll &gt; 11°<br/>pitch &gt; 20°"}
+        g1 -->|"limit drive / turn"| w1["wheel speeds<br/>skid steer, turn ×1.8"]
+        s1["/rN/stance"] --> l1["leg velocity commands<br/>open / close each V"]
+        r1["body roll (IMU)"] --> l1
+        d1["left rocker angle"] --> d2["right rocker mirrors it<br/>(differential servo)"]
+        w1 --> J1["wheel, leg, rocker joints"]
+        l1 --> J1
+        d2 --> J1
+    end
+    subgraph HX["HexWalk (hexapod)"]
+        direction LR
+        c2["cmd_vel<br/>vx, vy, wz"] --> p2["gait phase<br/>two tripods, 1-3 Hz"]
+        p2 --> f2["foot targets<br/>stance: slide back<br/>swing: up 11 cm, over, down"]
+        t2["terrain_ahead"] --> f2
+        k2["touch-down sensing<br/>IMU levelling"] --> f2
+        f2 --> ik["inverse kinematics"] --> J2["18 joints"]
+    end
+```
 
-**Robot health.** Each robot judges itself from its own sensors:
-- **down:** tipped past 60 deg for 5 s. Its explorer stops.
-- **stuck:** trying to move but stayed within 0.5 m for 2 min. It is ok again once it
-  gets 1 m away.
-- **ok:** otherwise.
+- **Wheel-leg:**
+  - wheel speeds also make up for the legs moving: while a V opens, the wheels roll with
+    it instead of pinning the feet;
+  - levelling opens one side's V more than the other when the body rolls.
+- **Hexapod:** a foot coming down stops where it touches something. The body height
+  follows the feet, so it rises onto a block instead of stubbing a leg.
+- **`hexabot_odom`** (both robots) turns the simulator's true pose into **drifting**
+  odometry (`odom → base_footprint`) plus the body tilt (`base_footprint → base_link`).
+  SLAM then has real drift to correct.
 
-Silence is not taken as failure; a robot out of range is usually just far away. A robot
-that is down, stuck or stopped by the operator loses its unfinished rooms at once, each
-to the healthy robot nearest to it.
+### 3. Mapping: `traversability`
+
+```mermaid
+flowchart LR
+    L["lidar/points<br/>3D cloud"] --> HM["height map<br/>10 cm cells, max height"]
+    HM --> ST["step map<br/>height jumps"]
+    ST --> CO["cost per cell"]
+    S["SLAM map<br/>(2D scan above teammates)"] --> FU
+    CO --> FU["fuse"]
+    FU --> GF["geofence<br/>lethal outside the building,<br/>except near the start"]
+    GF --> TM["teammates cleared<br/>own trail kept walkable"]
+    TM --> NM["nav_map<br/>5 cm, fixed size"]
+    NM --> N2["Nav2 costmaps"]
+    NM --> EX["explorer"]
+    CO --> TA["terrain_ahead<br/>(hexapod gait)"]
+```
+
+| `nav_map` value | meaning |
+|---|---|
+| 100 (lethal) | wall, anything taller than 40 cm, or the top of a step the robot can't climb |
+| 20-70 | climbable step, costlier the taller it is, so paths prefer flat floor |
+| 5 | "probably free": SLAM saw open space but no lidar ring has touched the floor yet |
+| 0 | flat floor seen by the lidar |
+| -1 | never seen |
+
+The lidar can't see the floor right around the robot, but the robot is standing there,
+so those cells are marked as floor. When the explorer reports it is stuck, the height
+map forgets everything within the blind radius and lets it refill.
+
+### 4. Navigation: Nav2 + `wall_guard`
+
+```mermaid
+flowchart LR
+    EX["explorer"] -->|"navigate_to_pose"| BT["bt_navigator<br/>3 retries, quick recovery"]
+    BT --> PL["planner<br/>NavFn A* on nav_map"]
+    PL --> CT["controller<br/>Regulated Pure Pursuit"]
+    CT -->|"cmd_vel_nav"| SM["velocity smoother"]
+    SM -->|"cmd_vel_raw"| WG["wall_guard<br/>(wheel-leg)"]
+    WG -->|"cmd_vel"| BR["bridge → plugin"]
+    ES["explorer escape moves<br/>Nav2 recoveries<br/>teleop / dashboard"] -->|"cmd_vel (direct)"| BR
+```
+
+- **Startup:** the explorer configures and activates the Nav2 nodes itself, retrying
+  until each one is up, and restarts them if bringup fails. There is no lifecycle
+  manager.
+- **Footprint:** the wheel-leg robot uses its 0.80 x 0.60 m rectangle; the hexapod uses
+  a 0.22 m circle.
+- **Late SLAM transforms:** the controller rides out up to 1 s of them instead of
+  dropping the path.
+
+| `wall_guard` sees (3D lidar, every cycle) | it does |
+|---|---|
+| something within 12 cm of one side | steers away from it and slows down |
+| both sides close (a doorway) | steers towards the middle |
+| something right ahead of the front edge | stops forward motion; turning still allowed |
+| turning in place, a corner would hit something | creeps forward or back, away from it |
+| pushing forward 2.5 s without moving | backs off for 1.2 s, turning away |
+
+### 5. Exploration: `explorer`
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> EXPLORING: start (Start all)
+    EXPLORING --> RETURNING: no frontiers left<br/>or time to head back<br/>or return_home
+    RETURNING --> DONE: back at the entrance
+    EXPLORING --> STOPPED: stop, or tipped over
+    STOPPED --> EXPLORING: start
+    EXPLORING --> MANUAL: takeover
+    MANUAL --> OPERATOR_GOAL: goto (map click)
+    OPERATOR_GOAL --> MANUAL: reached
+    MANUAL --> EXPLORING: resume
+```
+
+Each control step while exploring:
+
+1. **Find frontiers:** walkable `nav_map` cells next to unknown ones, inside the
+   building, that the robot can actually reach. Skip ones a teammate has already seen,
+   blacklisted ones and ones underfoot.
+2. **Score each frontier** by what it would reveal against the walking distance, minus a
+   penalty near teammates and their goals.
+3. **Own rooms first:** take the best frontier in its own rooms, or rooms nobody owns.
+   Only if there are none, take one in a teammate's room.
+4. **Fallback:** if its own map has no frontiers left, head for the edge of what *no
+   one in the team* has seen.
+5. **When stuck:**
+   - a goal that makes no progress for a while is blacklisted for 90 s;
+   - three quick failures in a row trigger an escape move;
+   - the wheel-leg robot drives straight out along its body, the hexapod crab-walks.
+6. **Head home** when the remaining time is just enough to get back (distance home ×
+   detour factor ÷ return speed + margin).
+
+It publishes `mission/status` once a second: pose, goal, state, distance, area, and open
+frontiers per room.
+
+### 6. Victim detection: `victim_detector`
+
+```mermaid
+flowchart LR
+    RGB["RGB camera"] --> Y["YOLOv8n<br/>person boxes"]
+    TH["thermal camera"] --> B["blobs<br/>28-45 °C body heat<br/>&gt; 52 °C fire"]
+    LI["lidar + odom + TF"] --> P
+    Y --> P["place in 3D<br/>box bottom → floor plane<br/>lidar refines distance"]
+    B --> P
+    P --> R{"inside a<br/>teammate's box?"}
+    R -->|"yes"| X["dropped"]
+    R -->|"no"| T["tracker per robot<br/>merge sightings"]
+    T --> O["/rN/victims<br/>visible · buried · hazards"]
+```
+
+- **One process for the whole team:** three CUDA contexts would not fit next to Gazebo on
+  a 4 GB GPU. Each robot still gets its own tracker and topics.
+- **Kinds:**
+  - **visible:** YOLO saw a person;
+  - **buried:** body heat seen repeatedly from 2+ places with no person in view;
+  - **hazard:** too hot to be a person (fire).
+- **Confidence** grows with sightings and viewpoints. Weak "ghost" tracks next to a
+  stronger one are folded into it.
+
+### 7. Swarm: `rescue_swarm/`
+
+One gossip round. Every agent does this once a second; here r1 is within range of r2:
+
+```mermaid
+sequenceDiagram
+    participant E1 as r1 explorer
+    participant A1 as r1 swarm_agent
+    participant R as radio
+    participant A2 as r2 swarm_agent
+    participant E2 as r2 explorer
+    E1->>A1: mission/status (pose, goal, frontiers per room)
+    Note over A1: update own health<br/>(tipped? stuck?)
+    A1->>R: radio/out: whole team view (JSON)
+    Note over R: line of sight ≤ 25 m,<br/>or ≤ 8 m through walls?
+    R->>A2: radio/in
+    Note over A2: merge, newest entry wins<br/>(poses, goals, explored grids,<br/>victims, rooms, health, frontiers)
+    Note over A2: rooms: done? adopt a fallen<br/>teammate's rooms? help the busiest?
+    A2->>E2: team/state (rooms, teammates, explored)
+    E2->>E2: pick frontiers: own rooms first
+```
+
+**What travels in a broadcast:**
+
+| field | content | merged by |
+|---|---|---|
+| `poses`, `goals`, `states` | where each robot is, where it heads, mission state | newest per robot |
+| `health` | ok / stuck / down | newest per robot |
+| `frontiers` | open frontiers per room | newest per robot; ignored after 20 s |
+| `explored` | 0.5 m grid per robot, base64 bit mask | OR |
+| `victims`, `hazards` | confirmed tracks | tracker merge |
+| `rooms` | room → [owner, time of last hand-over] | newest per room |
+
+News reaches a robot out of range through any teammate that hears both.
+
+**Who searches which room**, checked every round by each agent:
+
+```mermaid
+flowchart TB
+    S["start: every robot computes the same split<br/>rooms by bearing from the entrance, left to right,<br/>cut into equal groups (r1 left … r3 right)"] --> L
+    L["each round"] --> D["room done? ≥ 90 % explored by anyone<br/>AND no robot reports a frontier there<br/>(sticky: stays done)"]
+    D --> Q1{"a teammate down,<br/>stuck or stopped?"}
+    Q1 -->|"yes"| AD["take each of its open rooms<br/>I am the nearest healthy robot to"]
+    Q1 -->|"no"| Q2
+    AD --> Q2{"all my rooms done?"}
+    Q2 -->|"yes"| RB["take the nearest half of the busiest teammate's<br/>open rooms; never its current room,<br/>never its last one, never a room handed over &lt; 60 s ago"]
+    Q2 -->|"no"| K["keep searching my rooms"]
+```
+
+**Health** is judged by each robot about itself:
+- **down:** tipped past 60° for 5 s. Its explorer then stops.
+- **stuck:** less than 0.5 m of progress in 2 minutes while trying to move.
+
+Silence is never taken as failure.
+
+### 8. Mission control: `rescue_dashboard/`
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant S as server.py (aiohttp)
+    participant N as ROS 2 node (thread)
+    participant RO as robots / Gazebo
+    RO->>N: mission/status, team/state, maps, camera frames, radio/links
+    B->>S: open http://localhost:8080
+    S-->>B: world (building, entrance, robots), once
+    loop 4 Hz
+        S-->>B: state (robots, victims, rooms, health, events, charts)
+    end
+    B->>S: GET /api/frame/r1/rgb.jpg, /api/map.png
+    B->>S: {"cmd": "takeover", "robot": "r1"}
+    S->>N: call /r1/mission/takeover
+    B->>S: {"cmd": "teleop", ...} (joystick / keys)
+    N->>RO: /r1/cmd_vel (only while r1 is manual)
+    B->>S: {"cmd": "spawn_victim", ...}
+    S->>RO: ros_gz_sim create (into the running world)
+    N->>RO: /scenario/ground_truth (updated)
+```
+
+- Everything shown comes from the robots' own topics. The ground-truth file is read
+  only for the building outline, entrance and start poses, as a rescue team would have.
+- The **rooms** layer shows the newest owner per room across the robots' views.
+
+### 9. Evaluation: `rescue_eval/`
+
+```mermaid
+flowchart LR
+    RB["run_batch 2 3 4<br/>ARGS=difficulty:=hard"] --> M["mission.launch.py<br/>evaluate:=true · headless"]
+    M --> EV["evaluate<br/>listens only"]
+    EV --> W{"all robots done / stopped<br/>(or down), or time up?"}
+    W -->|"yes"| SC["score<br/>a report within 1.5 m of a victim is a hit,<br/>anything else a false positive"]
+    SC --> MD["seed&lt;N&gt;_&lt;R&gt;robots.md / .json"]
+    MD --> SU["summary_&lt;R&gt;robots.md"]
+```
+
+**What a report covers:**
+- victims found per kind, false positives, position error, first-sighting time;
+- hot decoys reported as hazards, or wrongly as victims;
+- floor coverage: the share of free floor some robot explored;
+- per robot: distance driven (ground truth), final state, whether back at the start,
+  worst health, rooms at the end, and where it tipped over if it did.
 
 ## Testing
 
