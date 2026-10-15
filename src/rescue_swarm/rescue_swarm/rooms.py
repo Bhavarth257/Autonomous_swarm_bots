@@ -8,7 +8,8 @@ contiguous, equal-sized group per robot, r1 taking the leftmost (it starts leftm
 
 Each entry of the book is [owner, t]; books merge entry by entry, newest wins, so a
 take-over spreads by gossip like everything else. A room is done once enough of it is
-explored by anyone. A robot whose own rooms are all done takes the half of the busiest
+explored by anyone and no robot has an open frontier left in it. A robot whose own rooms
+are all done takes the half of the busiest
 teammate's unfinished rooms nearest to itself (never the room that teammate is in or
 heading to), stamping them with the current time. It only takes from a teammate with at
 least two unfinished rooms, and never a room that changed hands in the last minute:
@@ -23,7 +24,10 @@ from __future__ import annotations
 
 import math
 
-DONE_FRACTION = 0.85
+# Done = explored this far by anyone AND no robot reports an open frontier in it. Explored
+# alone isn't enough: the lidar sees most of a room through its door long before anyone has
+# searched it (rooms were "done" within 5 min of a 11 min mission).
+DONE_FRACTION = 0.9
 
 
 def room_key(i, j):
@@ -68,6 +72,7 @@ class RoomBook:
         self.rooms = rooms
         self.robots = list(robots)
         self.book = {k: [r, 0.0] for k, r in initial_split(rooms, robots, entrance).items()}
+        self.finished = set()       # done stays done (no flicker when a stray frontier appears)
 
     def owner(self, key):
         e = self.book.get(key)
@@ -84,9 +89,14 @@ class RoomBook:
             if k in self.book and t > self.book[k][1]:
                 self.book[k] = [r, t]
 
-    def done(self, explored):
-        """{key: bool}; explored(x0, y0, x1, y1) -> fraction of that rectangle explored."""
-        return {k: explored(*r) >= DONE_FRACTION for k, r in self.rooms.items()}
+    def done(self, explored, open_frontiers=None):
+        """{key: bool}; explored(x0, y0, x1, y1) -> fraction of that rectangle explored;
+        open_frontiers: {key: frontiers some robot still has there}."""
+        open_frontiers = open_frontiers or {}
+        for k, r in self.rooms.items():
+            if k not in self.finished and explored(*r) >= DONE_FRACTION and not open_frontiers.get(k):
+                self.finished.add(k)
+        return {k: k in self.finished for k in self.rooms}
 
     def open_rooms(self, robot, done):
         return [k for k, (r, _) in self.book.items() if r == robot and not done[k]]

@@ -78,15 +78,18 @@ def test_sector_cost_splits_building_in_strips():
     assert cost(20.0) == 0.0 and cost(4.0) > 5.0
 
 
-def test_room_cost_prefers_own_and_done_rooms():
+def test_room_cost_ownership_holds_even_when_done():
     import types
     from rescue_navigation.explorer import Explorer
     rooms = [{'key': '0,0', 'owner': 'r1', 'done': False, 'rect': [0, 0, 6, 5]},
              {'key': '1,0', 'owner': 'r2', 'done': False, 'rect': [6, 0, 12, 5]},
              {'key': '2,0', 'owner': 'r2', 'done': True, 'rect': [12, 0, 18, 5]}]
-    e = types.SimpleNamespace(team_rooms=rooms, sector_penalty=5.0, team_size=3,
-                              get_namespace=lambda: '/r1')
+    e = types.SimpleNamespace(team_rooms=rooms, sector_penalty=5.0, team_size=3, robot='r1')
+    e.room_of = lambda x, y: Explorer.room_of(e, x, y)                   # noqa: E731
+    e.in_others_room = lambda x, y: Explorer.in_others_room(e, x, y)     # noqa: E731
     cost = lambda x, y: Explorer.sector_cost(e, x, y)        # noqa: E731
     assert cost(3, 2) == 0.0           # own room
     assert cost(8, 2) == 5.0           # r2's, still being searched
-    assert cost(14, 2) == 0.0          # r2's but done: free to help with leftovers
+    assert cost(14, 2) == 5.0          # r2's and "done": leftovers are still r2's
+    assert cost(20, 2) == 0.0          # in no room (outside the building)
+    assert e.room_of(8, 2)['key'] == '1,0' and e.room_of(20, 2) is None

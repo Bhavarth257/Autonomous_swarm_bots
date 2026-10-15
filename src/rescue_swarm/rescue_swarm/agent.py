@@ -122,6 +122,7 @@ class Agent(Node):
             wgoal = self.to_world(*goal) if goal else None
             self.team.set_self((wx, wy, yaw + self.map_in_world[2]), wgoal, self.status['state'], t)
         self.update_health(t, xy)
+        self.team.set_frontiers((self.status or {}).get('frontier_rooms') or {}, t)
         self.update_rooms(t)
         msg = self.team.message(t)
         msg['rooms'] = self.rooms.message()
@@ -148,7 +149,7 @@ class Agent(Node):
         """A teammate that can't search loses its rooms to the nearest healthy robot; own
         rooms all done: take some from the busiest teammate (rooms.py)."""
         explored = self.team.explored_by_team()
-        self.room_done = self.rooms.done(explored.fraction_in)
+        self.room_done = self.rooms.done(explored.fraction_in, self.team.open_frontiers(t))
         me = self.team.poses.get(self.me)
         if me is None or self.status is None or self.status.get('state') != 'exploring':
             return

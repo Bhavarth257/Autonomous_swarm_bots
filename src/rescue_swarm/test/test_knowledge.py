@@ -64,3 +64,14 @@ def test_health_spreads_by_gossip_newest_wins():
     old = a.message(10.0)
     del old['health']                              # a robot running older code
     c.receive(old, 10.0)
+
+
+def test_frontier_counts_gossip_and_go_stale():
+    from rescue_swarm.knowledge import TeamView
+    rect = (0.0, 0.0, 10.0, 10.0)
+    a, b = TeamView('r1', rect), TeamView('r2', rect)
+    a.set_frontiers({'0,0': 2}, 10.0)
+    b.set_frontiers({'0,0': 1, '1,0': 3}, 10.0)
+    b.receive(a.message(10.0), 10.0)
+    assert b.open_frontiers(12.0) == {'0,0': 3, '1,0': 3}
+    assert b.open_frontiers(40.0) == {}                          # old reports don't keep rooms open

@@ -108,3 +108,14 @@ def test_down_robot_never_takes_rooms():
     done = {k: book.owner(k) == 'r2' for k in rooms}                       # r2's own rooms done
     # r2 tipped over: its explorer may still say "exploring", but it must not grab work
     assert book.rebalance('r2', (12.0, 10.0), [], done, t=200.0, unavailable={'r2'}) == []
+
+
+def test_done_needs_no_open_frontiers_and_stays_done():
+    rooms = rm.room_rects(RECT, 4, 4)
+    book = rm.RoomBook(rooms, ROBOTS, ENTRANCE)
+    k = next(iter(rooms))
+    seen = lambda *r: 0.95                                       # the lidar has seen nearly everything
+    assert book.done(seen, {k: 2})[k] is False                   # ...but a robot still has frontiers there
+    assert book.done(lambda *r: 0.8, {})[k] is False             # not explored enough
+    assert book.done(seen, {})[k] is True
+    assert book.done(seen, {k: 1})[k] is True                    # a stray frontier later doesn't reopen it

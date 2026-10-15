@@ -104,6 +104,7 @@ class Explorer(Node):
         self.last_progress = (None, 0.0)   # (pose, time) of the last real movement
         self.n_frontiers = 0
         self.frontier_points = []
+        self.frontier_rooms = {}
         self.message = 'waiting for start'
 
         self.odom_frame = f'{prefix}odom'
@@ -363,6 +364,11 @@ class Explorer(Node):
                      for t, size in self.team_frontiers(reach, res, ox, oy)]
         self.n_frontiers = len(found)
         self.frontier_points = [f[0] for f in found]
+        self.frontier_rooms = {}
+        for f in found:
+            room = self.room_of(*self.to_world(*f[0]))
+            if room is not None:
+                self.frontier_rooms[room['key']] = self.frontier_rooms.get(room['key'], 0) + 1
 
         if not found:
             if self.explored_m2() < self.min_explored:
@@ -401,7 +407,10 @@ class Explorer(Node):
                 if d < self.spread:
                     s -= 2.0 * (self.spread - d)
             return s
-        target = max(found, key=score)[0]
+        # Own rooms (and rooms nobody owns) first, strictly: a frontier in a teammate's room
+        # is only taken when nothing else is left (passing through its rooms is fine).
+        mine = [f for f in found if not self.in_others_room(*self.to_world(*f[0]))]
+        target = max(mine or found, key=score)[0]
         self.send_goal(float(target[0]), float(target[1]), 'frontier')
 
     def _cell(self, target):
@@ -411,18 +420,26 @@ class Explorer(Node):
         h, w = self.grid.shape
         return min(max(j, 0), h - 1), min(max(i, 0), w - 1)
 
+    def room_of(self, wx, wy):
+        """The room-book entry (rooms.py, via the swarm agent) containing a world point."""
+        for room in getattr(self, 'team_rooms', None) or []:
+            x0, y0, x1, y1 = room['rect']
+            if x0 <= wx < x1 and y0 <= wy < y1:
+                return room
+        return None
+
+    def in_others_room(self, wx, wy):
+        """A frontier in a room a teammate is searching. Ownership holds until the room is
+        handed over, whether or not it already looks explored: leftovers are its owner's."""
+        room = self.room_of(wx, wy)
+        return room is not None and room['owner'] != self.robot
+
     def sector_cost(self, wx, wy=None):
         """Extra cost (m) of a frontier in a room another robot is searching (the swarm
         agent's room book: rooms.py). Before the first team state arrives, the building is
         split into side-by-side strips instead."""
-        rooms = getattr(self, 'team_rooms', None)
-        if rooms and wy is not None:
-            for room in rooms:
-                x0, y0, x1, y1 = room['rect']
-                if x0 <= wx < x1 and y0 <= wy < y1:
-                    mine = room['owner'] == self.get_namespace().strip('/')
-                    return 0.0 if mine or room['done'] else self.sector_penalty
-            return 0.0
+        if getattr(self, 'team_rooms', None) and wy is not None:
+            return self.sector_penalty if self.in_others_room(wx, wy) else 0.0
         if self.team_size < 2:
             return 0.0
         x0, _, x1, _ = self.rect
@@ -707,6 +724,8 @@ class Explorer(Node):
             'pose': [round(v, 2) for v in self.pose] if self.pose else None,
             'goal': [round(v, 2) for v in self.goal] if self.goal else None,
             'frontiers': self.n_frontiers,
+            # open frontiers per room, only while searching (rooms.py: a room with any isn't done)
+            'frontier_rooms': self.frontier_rooms if self.state == EXPLORING else {},
             'blacklisted': sum(1 for b in self.blacklist if self.now() - b[2] < self.blacklist_ttl),
             'explored_m2': round(self.explored_m2(), 1),
             'distance_m': round(self.distance, 1),
