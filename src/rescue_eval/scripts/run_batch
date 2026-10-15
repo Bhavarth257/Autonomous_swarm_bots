@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # Run headless missions over several seeds and summarise the scores.
 #   run_batch [seeds...]        default: 1 2 3 4 5
-# Env: ROBOTS (3), TIME_LIMIT (900 s). Reports go to ~/rescue_reports/.
+# Env: ROBOTS (3), TIME_LIMIT (900 s, mission time), ARGS (more launch arguments, e.g.
+# ARGS="difficulty:=hard robot:=hexapod"). Reports go to ~/rescue_reports/.
+# A mission ends by itself once every robot is home; the wall-clock timeout is only a
+# safety net, generous because the simulation often runs at 0.3-0.5x real time.
 set -u
 ROBOTS=${ROBOTS:-3}
 TIME_LIMIT=${TIME_LIMIT:-900}
+ARGS=${ARGS:-}
 SEEDS=${*:-1 2 3 4 5}
 mkdir -p ~/rescue_reports
 for seed in $SEEDS; do
-  echo "=== seed $seed: $ROBOTS robots, limit ${TIME_LIMIT}s"
+  echo "=== seed $seed: $ROBOTS robots, limit ${TIME_LIMIT}s $ARGS"
   # Own process group, cleared afterwards, so nothing from one seed survives into the next.
-  setsid timeout $((TIME_LIMIT + 400)) ros2 launch rescue_bringup mission.launch.py seed:=$seed \
+  setsid timeout $((TIME_LIMIT * 4 + 600)) ros2 launch rescue_bringup mission.launch.py seed:=$seed \
     num_robots:=$ROBOTS gui:=false rviz:=false dashboard:=false auto_start:=true evaluate:=true \
-    time_limit:=$TIME_LIMIT > ~/rescue_reports/seed${seed}_${ROBOTS}robots.log 2>&1 &
+    time_limit:=$TIME_LIMIT $ARGS > ~/rescue_reports/seed${seed}_${ROBOTS}robots.log 2>&1 &
   pid=$!
   wait $pid
   kill -INT -- -$pid 2>/dev/null; sleep 5; kill -KILL -- -$pid 2>/dev/null
